@@ -1,0 +1,93 @@
+# ---------------------------------------------------------------------------
+# Kubernetes / cluster state
+# ---------------------------------------------------------------------------
+kubeconfig
+kubeconfig.*
+*.kubeconfig
+.kube/
+
+# Rendered or generated manifests - the templates are the source of truth.
+rendered/
+generated/
+*.rendered.yaml
+
+# ---------------------------------------------------------------------------
+# Secrets — never commit these
+# ---------------------------------------------------------------------------
+# The labs use `stringData` in checked-in Secrets on purpose, for teaching.
+# Anything matching these patterns is a real credential and must stay local.
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets.yaml
+secrets.*.yaml
+*-secret.local.yaml
+.env
+.env.*
+!.env.example
+credentials
+.aws/
+
+# ---------------------------------------------------------------------------
+# Helm
+# ---------------------------------------------------------------------------
+charts/*.tgz
+*.tgz
+labs/08-helm-chart/demo-app/charts/
+labs/08-helm-chart/demo-app/Chart.lock
+labs/08-helm-chart/demo-app/requirements.lock
+
+# ---------------------------------------------------------------------------
+# Go
+# ---------------------------------------------------------------------------
+app/demo-app
+app/bin/
+bin/
+dist/
+*.exe
+*.test
+*.out
+coverage.txt
+vendor/
+
+# ---------------------------------------------------------------------------
+# Terraform (if infra is added later)
+# ---------------------------------------------------------------------------
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+
+# ---------------------------------------------------------------------------
+# Editors and tooling
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.venv/
+venv/
+__pycache__/
+*.pyc
+node_modules/
+
+# ---------------------------------------------------------------------------
+# OS
+# ---------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# Scratch
+# ---------------------------------------------------------------------------
+tmp/
+scratch/
+*.log

@@ -1,0 +1,90 @@
+---
+# Child Application: the demo app's PROD overlay.
+#
+# Same base, same repo, different overlay and namespace -- and notably
+# different sync policy. This file is the whole argument for overlays: the
+# difference between environments is small, explicit and reviewable.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-app-prod
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: demo-app-prod
+    app.kubernetes.io/instance: lab-10
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: application
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: argocd
+  annotations:
+    # Wave 2: after dev.
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: kubernetes-labs
+
+  source:
+    # >>> REPLACE WITH YOUR FORK <<<
+    repoURL: https://github.com/maneeshm/kubernetes-labs.git
+    # A branch is fine for dev. Production should track an immutable ref -- a
+    # tag or a commit SHA -- so that "what is in prod" is a fact rather than
+    # a function of whoever merged most recently. Promotion then becomes an
+    # explicit commit that bumps this field, which is auditable and revertible.
+    #   targetRevision: v1.4.2
+    targetRevision: main
+    path: labs/10-gitops-argocd/manifests/demo-app/overlays/prod
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: lab-10-gitops-prod
+
+  syncPolicy:
+    automated:
+      # Prune is ON but selfHeal is deliberately OFF for production in this
+      # example. The trade-off is real and worth stating plainly:
+      #
+      #   selfHeal ON  -- drift is corrected in seconds, but an emergency
+      #                   manual fix during an incident gets reverted out from
+      #                   under the responder, sometimes mid-mitigation.
+      #   selfHeal OFF -- drift is REPORTED as OutOfSync and a human decides,
+      #                   so the break-glass path stays usable.
+      #
+      # Neither is universally right. Teams with mature incident tooling
+      # usually turn it on; teams that still fix production by hand should not.
+      prune: true
+      selfHeal: false
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+      - ServerSideApply=true
+      # Prune deletions happen last, after everything else has been applied.
+      # This avoids a window where a resource has been removed but its
+      # replacement has not landed yet.
+      - PruneLast=true
+      # Refuse to sync if the rendered manifests contain a resource the
+      # AppProject does not permit, rather than partially applying.
+      - FailOnSharedResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+    # A PDB's status is populated by the controller and is never in git.
+    - group: policy
+      kind: PodDisruptionBudget
+      jsonPointers:
+        - /status
+
+  # Keep more history in production so `argocd app rollback` has somewhere to
+  # go. Each entry records the git SHA that produced the state, which makes
+  # this an audit log of every change prod has ever seen.
+  revisionHistoryLimit: 20

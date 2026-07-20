@@ -1,0 +1,39 @@
+---
+# NodePort opens the SAME port on EVERY node in the cluster and forwards it to
+# the Service. It is a superset of ClusterIP: a NodePort Service still gets a
+# ClusterIP, and the node port is layered on top.
+#
+# It is useful for local development and as the plumbing underneath a cloud
+# LoadBalancer, but it is a poor production edge: the port range is restricted
+# to 30000-32767, you must know node IPs, and nothing terminates TLS or routes
+# by hostname. Use an Ingress (30-ingress.yaml) for real north-south traffic.
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-nodeport
+  namespace: lab-02-networking
+  labels:
+    app.kubernetes.io/name: web
+    app.kubernetes.io/instance: lab-02
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  type: NodePort
+  # Cluster (the default) lets any node accept the traffic and forward it on,
+  # at the cost of an extra hop and the loss of the client source IP. Setting
+  # this to Local preserves the source IP but only nodes actually running a
+  # ready pod will answer - which is exactly what cloud LB health checks want.
+  externalTrafficPolicy: Cluster
+  selector:
+    app.kubernetes.io/name: web
+    app.kubernetes.io/instance: lab-02
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      # Pinned so the walkthrough can hard-code a URL. Omit nodePort in real
+      # manifests and let the API server allocate one, to avoid collisions.
+      nodePort: 30080
+      protocol: TCP

@@ -1,0 +1,182 @@
+---
+# An in-cluster kubectl. Exec into this Pod and you are authenticating as
+# system:serviceaccount:lab-05-rbac:kubectl-debug - exactly the identity an
+# attacker would hold after compromising a workload. Testing RBAC from here is
+# far more honest than testing it from your laptop as a cluster-admin.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kubectl-debug
+  namespace: lab-05-rbac
+  labels:
+    app.kubernetes.io/name: kubectl-debug
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: tooling
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  serviceAccountName: kubectl-debug
+  automountServiceAccountToken: true
+  # Nothing to restart if it exits - we only ever exec into it.
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 5
+  securityContext:
+    # NOTE: 1001, not 65532. The rest of this repo standardises on 65532
+    # (distroless `nonroot`) because our own image is built with that UID baked
+    # into /etc/passwd and file ownership. The bitnami/kubectl image is built on
+    # a Bitnami base whose files are owned by UID 1001 / GID 0, and it declares
+    # USER 1001 in its Dockerfile. Forcing 65532 here would leave the kubectl
+    # binary and its config directory unreadable - the container would start and
+    # then fail on the first command with a permissions error.
+    #
+    # The lesson generalises: runAsUser is not a value you pick, it is a value
+    # you read off the image. The invariant to enforce cluster-wide is
+    # runAsNonRoot: true; the specific UID is per-image.
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    fsGroup: 1001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: kubectl
+      image: bitnami/kubectl:1.31
+      imagePullPolicy: IfNotPresent
+      # Keep the container alive without a shell loop burning CPU. `sleep
+      # infinity` is a coreutils builtin here and costs nothing.
+      command: ["sleep"]
+      args: ["infinity"]
+      env:
+        # kubectl writes its discovery and HTTP caches under $HOME/.kube/cache.
+        # With readOnlyRootFilesystem the default HOME is not writable, so we
+        # point HOME at an emptyDir. Without this every command still works but
+        # prints a warning and re-fetches discovery on each invocation.
+        - name: HOME
+          value: /home/kubectl
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      # Probes on a tooling Pod: `exec` probes, because there is no HTTP server
+      # to hit. They prove the container is still schedulable and responsive
+      # without pretending it serves traffic.
+      livenessProbe:
+        exec:
+          command: ["true"]
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 2
+        failureThreshold: 3
+      readinessProbe:
+        exec:
+          command: ["true"]
+        initialDelaySeconds: 3
+        periodSeconds: 5
+        timeoutSeconds: 2
+        failureThreshold: 3
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: home
+          mountPath: /home/kubectl
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: home
+      emptyDir:
+        sizeLimit: 32Mi
+    - name: tmp
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Mi
+---
+# The powerless twin. Same image, same tooling, an identity with no bindings and
+# no mounted token at all. Exec in here and every API call fails - which is the
+# behaviour you want from a workload that has no business talking to the API.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kubectl-noperms
+  namespace: lab-05-rbac
+  labels:
+    app.kubernetes.io/name: kubectl-noperms
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: tooling
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  serviceAccountName: no-perms
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 5
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1001
+    runAsGroup: 1001
+    fsGroup: 1001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: kubectl
+      image: bitnami/kubectl:1.31
+      imagePullPolicy: IfNotPresent
+      command: ["sleep"]
+      args: ["infinity"]
+      env:
+        - name: HOME
+          value: /home/kubectl
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      livenessProbe:
+        exec:
+          command: ["true"]
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 2
+        failureThreshold: 3
+      readinessProbe:
+        exec:
+          command: ["true"]
+        initialDelaySeconds: 3
+        periodSeconds: 5
+        timeoutSeconds: 2
+        failureThreshold: 3
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: home
+          mountPath: /home/kubectl
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: home
+      emptyDir:
+        sizeLimit: 32Mi
+    - name: tmp
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Mi

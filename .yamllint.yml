@@ -1,0 +1,67 @@
+---
+# yamllint configuration for kubernetes-labs.
+#
+# Deliberately stricter than `relaxed` but looser than `default` in the two
+# places where Kubernetes manifests and the default rules disagree:
+#   - line-length: 80 is unworkable for image refs and annotations
+#   - truthy: Kubernetes uses `on:` in GitHub workflows, which yamllint's
+#     truthy rule flags by default
+
+extends: default
+
+ignore: |
+  .git/
+  # Helm templates are Go templates, not YAML - `{{- if ... }}` is not
+  # parseable and linting it produces nothing but noise. `helm lint` and
+  # `helm template` cover this directory instead.
+  labs/08-helm-chart/demo-app/templates/
+
+rules:
+  line-length:
+    max: 120
+    level: error
+    allow-non-breakable-words: true
+    allow-non-breakable-inline-mappings: true
+
+  # GitHub Actions' `on:` key is the canonical false positive here.
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+
+  comments:
+    min-spaces-from-content: 1
+    require-starting-space: true
+
+  # Disabled deliberately. The labs lean heavily on commented-out YAML blocks
+  # ("uncomment this to see what breaks"), and those comments are indented to
+  # match the block they replace rather than the surrounding content - which is
+  # exactly what this rule objects to.
+  comments-indentation: disable
+
+  document-start:
+    present: true
+
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
+
+  # Kubernetes manifests routinely nest deeply enough that trailing empty
+  # values are meaningful (e.g. an empty `annotations: {}`).
+  empty-values:
+    forbid-in-block-mappings: false
+    forbid-in-flow-mappings: true
+
+  braces:
+    max-spaces-inside: 1
+
+  brackets:
+    max-spaces-inside: 1
+
+  # Kubernetes file modes (`defaultMode: 0444`) must be written as implicit
+  # octal. kubectl parses manifests with YAML 1.1 semantics, so `0444` is read
+  # as octal 292 - the intended r--r--r--. The YAML 1.2 form `0o444` does NOT
+  # parse correctly there, and decimal is unreadable. So implicit octal is the
+  # only correct option, and this rule has to be off.
+  octal-values:
+    forbid-implicit-octal: false
+    forbid-explicit-octal: false

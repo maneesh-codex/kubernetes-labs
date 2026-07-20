@@ -1,0 +1,132 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-web
+  namespace: lab-01-workloads
+  labels:
+    app.kubernetes.io/name: demo-web
+    app.kubernetes.io/instance: lab-01
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 3
+  # Keep the last five ReplicaSets so `kubectl rollout undo --to-revision` has
+  # something to roll back to. The default of 10 is usually more history than
+  # anyone needs and it clutters `kubectl get rs`.
+  revisionHistoryLimit: 5
+  # A new pod must stay Ready for 10s before it counts as available. Without
+  # this, a pod that passes its readiness probe once and then crashes can still
+  # let the rollout march forward and take down the whole fleet.
+  minReadySeconds: 10
+  progressDeadlineSeconds: 600
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-web
+      app.kubernetes.io/instance: lab-01
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Surge one extra pod, never drop below full capacity. This is the safe
+      # default for a stateless service that has spare cluster headroom.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: demo-web
+        app.kubernetes.io/instance: lab-01
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: frontend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread replicas across nodes so losing one node cannot take out the
+      # whole Deployment. ScheduleAnyway (rather than DoNotSchedule) keeps this
+      # working on a single-node kind cluster; in a real multi-AZ EKS cluster
+      # you would tighten this to DoNotSchedule and add a second constraint on
+      # topology.kubernetes.io/zone.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: demo-web
+              app.kubernetes.io/instance: lab-01
+      containers:
+        - name: demo
+          image: ghcr.io/maneeshm/k8s-labs-demo:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: GREETING
+              value: "Hello from a Deployment-managed Pod - kill me and I come back."
+            # The downward API injects pod identity without the app needing any
+            # Kubernetes client library. The demo app echoes these on /api/info,
+            # which makes load balancing across replicas visible from curl.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          # The startup probe owns the "is it up yet?" question for the first
+          # 30s (10 x 3s). Until it succeeds the liveness probe is suppressed,
+          # so a slow start can never be mistaken for a hang and restarted.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

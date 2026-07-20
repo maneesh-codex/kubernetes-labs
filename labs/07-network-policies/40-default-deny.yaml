@@ -1,0 +1,61 @@
+---
+# =============================================================================
+# DEFAULT DENY - the foundation. Apply this FIRST, then punch holes.
+# =============================================================================
+# Mental model, and the single most important paragraph in this lab:
+#
+#   A Pod is "unselected" until some NetworkPolicy's podSelector matches it.
+#   An unselected Pod is completely unrestricted - all ingress, all egress.
+#
+#   The moment ANY policy selects a Pod for a direction (via policyTypes), that
+#   direction flips to default-deny for that Pod, and thereafter the ONLY
+#   traffic permitted is the UNION of the rules in every policy selecting it.
+#
+# Consequences that trip everyone up at least once:
+#   * Policies are purely ADDITIVE / whitelist-only. There is no deny rule, no
+#     rule ordering, no priority, and no way for one policy to override
+#     another. If two policies select the same Pod, the Pod gets both sets of
+#     allowances. You cannot "subtract" access by adding a policy.
+#   * Ingress and egress are evaluated INDEPENDENTLY, and both ends must agree.
+#     For A to reach B you need an egress rule on A permitting B AND an ingress
+#     rule on B permitting A. Forgetting the egress half is the second most
+#     common failure in this lab (DNS is the first).
+#   * Reply traffic is allowed automatically - implementations are stateful, so
+#     you do not write a return-path rule for an established TCP connection.
+#
+# An empty podSelector `{}` selects EVERY Pod in the namespace. Combined with
+# an empty rule set, that is the canonical default-deny.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: lab-07-netpol
+  labels:
+    app.kubernetes.io/name: default-deny-all
+    app.kubernetes.io/instance: lab-07
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: security
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  # {} = all Pods in this namespace. NetworkPolicy is always namespaced; there
+  # is no cluster-wide default-deny in the core API (Calico's
+  # GlobalNetworkPolicy and Cilium's CiliumClusterwideNetworkPolicy fill that
+  # gap, and AdminNetworkPolicy is the upstream answer - see the README).
+  podSelector: {}
+  # Declaring both directions is what makes this a *full* default deny. Omitting
+  # `Egress` here would leave every Pod free to call anything, anywhere,
+  # including the metadata service - which is exactly the half-measure most
+  # "we have network policies" claims turn out to be.
+  policyTypes:
+    - Ingress
+    - Egress
+  # No `ingress:` and no `egress:` key at all. An absent rule list means "no
+  # traffic permitted in this direction".
+  #
+  # Contrast carefully - these are NOT the same:
+  #   (absent)        -> deny everything
+  #   ingress: []     -> deny everything (explicit empty list, same effect)
+  #   ingress:        -> ALLOW everything (one rule with no restrictions)
+  #     - {}
+  # That last form is a genuine footgun. `- {}` is an allow-all rule.

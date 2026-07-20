@@ -1,0 +1,26 @@
+---
+# Governing headless Service for the demo-app StatefulSet. Gives every pod a
+# stable DNS name: demo-sts-0.demo-sts.lab-04-storage.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-sts
+  namespace: lab-04-storage
+  labels:
+    app.kubernetes.io/name: demo-sts
+    app.kubernetes.io/instance: lab-04
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    app.kubernetes.io/name: demo-sts
+    app.kubernetes.io/instance: lab-04
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,37 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: lab-11-troubleshooting
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: namespace
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+    # ------------------------------------------------------------------------
+    # DELIBERATE DEVIATION FROM THE REST OF THE REPO
+    # ------------------------------------------------------------------------
+    # Every other lab sets `pod-security.kubernetes.io/enforce: restricted`.
+    # This one does NOT, and the omission is the point.
+    #
+    # Several of the broken manifests in `broken/` intentionally violate the
+    # restricted Pod Security Standard - that is the failure being taught. With
+    # `enforce` on, the API server would reject them at admission time and you
+    # would never see the runtime symptom (CrashLoopBackOff, OOMKilled, a
+    # read-only filesystem error) that the scenario exists to demonstrate.
+    #
+    # `warn` and `audit` stay on, so you still get the advisory message on the
+    # terminal and a record in the audit log. That combination - warn and audit
+    # without enforce - is also exactly how you should roll Pod Security out to
+    # an existing cluster: observe first, enforce once the warnings are zero.
+    #
+    # Everything in `fixed/` is fully restricted-compliant, so you can prove the
+    # fixes by flipping enforce on:
+    #   kubectl label ns lab-11-troubleshooting \
+    #     pod-security.kubernetes.io/enforce=restricted --overwrite
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

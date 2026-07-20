@@ -1,0 +1,59 @@
+---
+# kind cluster definition for the kubernetes-labs exercises.
+#
+# Shape: one control-plane node plus two workers. Two workers is the minimum
+# that makes topologySpreadConstraints, pod anti-affinity, node draining and
+# StatefulSet scheduling behave like they do on a real cluster - on a
+# single-node kind cluster most of those lessons are invisible.
+#
+# Usage:
+#   kind create cluster --name k8s-labs --config kind/cluster.yaml
+# or simply:
+#   make cluster-up
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: k8s-labs
+
+networking:
+  # Explicit subnets keep the NetworkPolicy lab (07) predictable: the ipBlock
+  # rules there reference these ranges directly.
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/16"
+  # kindnet, the default CNI, does NOT enforce NetworkPolicy. Lab 07 explains
+  # how to recreate this cluster with `disableDefaultCNI: true` plus Calico if
+  # you want policies to actually be enforced.
+  disableDefaultCNI: false
+  kubeProxyMode: "iptables"
+
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      # This label is what the ingress-nginx "kind" provider manifest uses as
+      # its nodeSelector, and it is what lets the controller bind host ports.
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # Publish the ingress controller's HTTP/HTTPS ports onto the host so
+      # `curl http://demo.localtest.me` works from your laptop in lab 02.
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+
+  - role: worker
+    labels:
+      # Synthetic topology labels. Real clusters get these from the cloud
+      # provider; here we fake two zones so lab 01's topologySpreadConstraints
+      # and lab 04's volume topology notes have something to spread across.
+      topology.kubernetes.io/zone: zone-a
+      node-role.kubernetes.io/worker: "worker"
+
+  - role: worker
+    labels:
+      topology.kubernetes.io/zone: zone-b
+      node-role.kubernetes.io/worker: "worker"

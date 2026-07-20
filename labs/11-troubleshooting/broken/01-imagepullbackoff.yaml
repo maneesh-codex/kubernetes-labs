@@ -1,0 +1,103 @@
+---
+# BROKEN SCENARIO 01 - ImagePullBackOff
+#
+# The image tag does not exist. Everything else about this manifest is correct,
+# which is exactly what makes the failure instructive: the scheduler is happy,
+# the node is happy, and the Pod still never runs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-01-imagepull
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-01-imagepull
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broken-01-imagepull
+      app.kubernetes.io/instance: lab-11
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broken-01-imagepull
+        app.kubernetes.io/instance: lab-11
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: demo-app
+          # BUG: tag 9.9.9 was never published. The real tag is 1.0.0.
+          image: ghcr.io/maneeshm/k8s-labs-demo:9.9.9
+          # BUG (secondary): `Always` forces a registry round trip even when a
+          # good image is cached locally. On kind, where images are side-loaded
+          # with `kind load`, `Always` turns a working deployment into an
+          # ImagePullBackOff for a completely different reason. Use IfNotPresent.
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

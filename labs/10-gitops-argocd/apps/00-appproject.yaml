@@ -1,0 +1,133 @@
+---
+# An AppProject is Argo CD's tenancy and blast-radius boundary. Every
+# Application belongs to exactly one, and the project constrains WHERE it may
+# deploy from, WHERE it may deploy to, and WHAT kinds it may create.
+#
+# The built-in `default` project allows everything from everywhere to
+# everywhere. Running production Applications in it means a mistyped path in a
+# pull request can create a ClusterRoleBinding in kube-system, and Argo will
+# apply it obediently. Projects are how you make that impossible rather than
+# merely discouraged.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: kubernetes-labs
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: kubernetes-labs
+    app.kubernetes.io/instance: lab-10
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: appproject
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: argocd
+  annotations:
+    # Wave -1 so the project exists before any Application that references it.
+    # An Application naming a non-existent project is rejected outright, so
+    # this ordering is required rather than merely tidy.
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Applications belonging to the kubernetes-labs portfolio repo.
+
+  # Which git repositories Applications in this project may deploy FROM.
+  # A wildcard here defeats most of the point: an attacker who can create an
+  # Application could otherwise point it at their own repo and have Argo apply
+  # arbitrary manifests with Argo's own (cluster-admin, typically) permissions.
+  sourceRepos:
+    - https://github.com/maneeshm/kubernetes-labs.git
+    # The monitoring Application pulls a chart from this Helm repo, so it must
+    # be allowed explicitly too.
+    - https://prometheus-community.github.io/helm-charts
+
+  # Which cluster/namespace pairs may be deployed TO.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: lab-10-gitops
+    - server: https://kubernetes.default.svc
+      namespace: lab-10-gitops-prod
+    - server: https://kubernetes.default.svc
+      namespace: monitoring
+    # argocd itself, so the root app can manage the child Applications.
+    - server: https://kubernetes.default.svc
+      namespace: argocd
+
+  # Cluster-scoped resources are the dangerous ones: there is no namespace to
+  # contain a mistake. Deny by default, then allow exactly what is needed.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    # kube-prometheus-stack installs CRDs and cluster RBAC, so the monitoring
+    # Application genuinely needs these. Everything else stays denied.
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+    - group: storage.k8s.io
+      kind: StorageClass
+
+  # Namespaced resources: allow all, then subtract. ResourceQuota and
+  # LimitRange are excluded because a project that can rewrite its own quota
+  # can escape the limits the platform team set for it.
+  namespaceResourceWhitelist:
+    - group: "*"
+      kind: "*"
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+
+  # Who may do what, expressed as Argo RBAC. Bind these to OIDC groups via the
+  # argocd-rbac-cm ConfigMap -- see the production notes in the README.
+  roles:
+    - name: developer
+      description: Read-only plus the ability to sync, but never to delete.
+      policies:
+        - p, proj:kubernetes-labs:developer, applications, get, kubernetes-labs/*, allow
+        - p, proj:kubernetes-labs:developer, applications, sync, kubernetes-labs/*, allow
+        - p, proj:kubernetes-labs:developer, applications, action/*, kubernetes-labs/*, allow
+        - p, proj:kubernetes-labs:developer, logs, get, kubernetes-labs/*, allow
+        - p, proj:kubernetes-labs:developer, applications, delete, kubernetes-labs/*, deny
+      groups:
+        - kubernetes-labs:developers
+
+    - name: admin
+      description: Full control over Applications in this project.
+      policies:
+        - p, proj:kubernetes-labs:admin, applications, *, kubernetes-labs/*, allow
+      groups:
+        - kubernetes-labs:platform
+
+  # Deny syncs during a change freeze. Argo still detects drift and reports
+  # OutOfSync; it just refuses to act automatically. Far better than disabling
+  # automation entirely, because you keep the visibility.
+  syncWindows:
+    - kind: deny
+      # Friday 18:00 through the weekend.
+      schedule: "0 18 * * 5"
+      duration: 60h
+      applications:
+        - demo-app-prod
+      namespaces:
+        - lab-10-gitops-prod
+      # Manual syncs are still permitted, so a genuine emergency fix is not
+      # blocked -- it just requires a human to make a deliberate decision.
+      manualSync: true
+      timeZone: Europe/London
+
+  # Prevent an Application in this project from being reassigned to another
+  # project without going through the platform team.
+  permitOnlyProjectScopedClusters: false
+
+  orphanedResources:
+    # Warn (in the UI) about resources living in these namespaces that no
+    # Application claims. Usually leftovers from a manual kubectl apply.
+    # `warn: false` means it is reported but does not mark the app degraded.
+    warn: false

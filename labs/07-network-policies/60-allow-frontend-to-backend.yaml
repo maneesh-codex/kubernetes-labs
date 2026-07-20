@@ -1,0 +1,71 @@
+---
+# Half one of the frontend -> backend path: EGRESS from the frontend.
+#
+# You need both halves. Applying only this one leaves the backend's ingress
+# still default-denied, and the connection fails at the destination instead of
+# at the source - with the same "timed out" symptom, which is why people
+# conclude the policy "did not work" and delete the wrong object.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-egress-to-backend
+  namespace: lab-07-netpol
+  labels:
+    app.kubernetes.io/name: frontend-egress-to-backend
+    app.kubernetes.io/instance: lab-07
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: security
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  podSelector:
+    matchLabels:
+      netpol.kubernetes-labs.io/tier: frontend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              netpol.kubernetes-labs.io/tier: backend
+      ports:
+        - protocol: TCP
+          # 8080 = the BACKEND CONTAINER's port, not a Service port. By the time
+          # the packet is evaluated, kube-proxy (or eBPF) has already rewritten
+          # the destination to the Pod IP and target port. If the Service
+          # exposed `port: 80, targetPort: 8080`, this rule would still read
+          # 8080. Getting this backwards produces a policy that silently drops
+          # everything.
+          port: 8080
+---
+# Half two: INGRESS to the backend.
+#
+# Note that a `podSelector` with NO `namespaceSelector` means "Pods with these
+# labels IN THIS NAMESPACE". It never matches across namespaces. To admit
+# traffic from another namespace you must say so explicitly - see 80-*.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-ingress-from-frontend
+  namespace: lab-07-netpol
+  labels:
+    app.kubernetes.io/name: backend-ingress-from-frontend
+    app.kubernetes.io/instance: lab-07
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: security
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  podSelector:
+    matchLabels:
+      netpol.kubernetes-labs.io/tier: backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              netpol.kubernetes-labs.io/tier: frontend
+      ports:
+        - protocol: TCP
+          port: 8080

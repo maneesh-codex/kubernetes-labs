@@ -1,0 +1,51 @@
+---
+# ClusterIP is the default Service type and the one you should reach for 99% of
+# the time. It allocates a stable virtual IP from the service CIDR; kube-proxy
+# programs iptables (or IPVS/nftables) rules on every node so that traffic to
+# that VIP is DNAT'd to a randomly chosen ready pod IP. There is no process
+# listening on a ClusterIP - it is a routing fiction maintained by the kernel.
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: lab-02-networking
+  labels:
+    app.kubernetes.io/name: web
+    app.kubernetes.io/instance: lab-02
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: web
+    app.kubernetes.io/instance: lab-02
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: lab-02-networking
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/instance: lab-02
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/instance: lab-02
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,103 @@
+---
+# BROKEN SCENARIO 03 - Pod Pending, unsatisfiable resource request
+#
+# `cpu: 100` means ONE HUNDRED CORES, not 100 millicores. The missing `m` is a
+# genuinely common typo and a genuinely expensive one: the Pod is unschedulable
+# forever, and on a cluster with a node autoscaler it can also trigger a
+# scale-up attempt for an instance type that does not exist.
+#
+# This is safe to apply: an unschedulable Pod consumes no node resources at all.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-03-pending-resources
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-03-pending-resources
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broken-03-pending-resources
+      app.kubernetes.io/instance: lab-11
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broken-03-pending-resources
+        app.kubernetes.io/instance: lab-11
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: demo-app
+          image: ghcr.io/maneeshm/k8s-labs-demo:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              # BUG: 100 cores. Should be 100m (0.1 cores).
+              cpu: 100
+              # BUG: 64Gi, not 64Mi. Same class of typo, different unit.
+              memory: 64Gi
+            limits:
+              cpu: 200
+              memory: 128Gi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

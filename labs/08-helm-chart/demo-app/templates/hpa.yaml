@@ -1,0 +1,57 @@
+{{- if .Values.autoscaling.enabled -}}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "demo-app.fullname" . }}
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "demo-app.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.autoscaling.targetCPUUtilizationPercentage }}
+    # Utilisation is a percentage of the container's CPU *request*, not its
+    # limit and not the node capacity. With a 50m request, 80% triggers at 40m.
+    # This is why a service with no resource requests cannot be autoscaled on
+    # utilisation at all -- the denominator does not exist.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    # Memory is a poor autoscaling signal for most runtimes: adding replicas
+    # does not reclaim heap from the existing ones, so a memory-driven HPA
+    # tends to scale out and never back in. Enabled here to show the shape.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+  behavior:
+    scaleUp:
+      # React quickly to load, but not so quickly that a 15-second traffic
+      # spike doubles the fleet.
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+    scaleDown:
+      # Scale in slowly. A five-minute window stops the HPA from flapping
+      # around a threshold, which is the single most common HPA complaint.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+{{- end }}

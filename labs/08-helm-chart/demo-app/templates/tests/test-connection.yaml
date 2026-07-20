@@ -1,0 +1,75 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "demo-app.fullname" . }}-test-connection"
+  labels:
+    # Spelled out rather than reusing the `demo-app.labels` helper, because
+    # that helper hard-codes `component: web`. Appending `component: test`
+    # after it produces a DUPLICATE map key -- which Helm renders happily and
+    # `helm lint` does not flag, but which strict YAML parsers and the API
+    # server reject. Caught here by kubeconform; worth remembering that
+    # `helm template` succeeding is not proof the output is valid.
+    helm.sh/chart: {{ include "demo-app.chart" . }}
+    {{- include "demo-app.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/version: {{ include "demo-app.imageTag" . | quote }}
+    app.kubernetes.io/component: test
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    # `helm test` runs this pod and reports the release healthy only if it
+    # exits 0. The delete policy keeps a failed test pod around so its logs can
+    # be read; successful runs are cleaned up before the next test.
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      image: curlimages/curl:8.11.1
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - -c
+      args:
+        - |
+          set -eu
+          URL="http://{{ include "demo-app.fullname" . }}:{{ .Values.service.port }}"
+          echo "==> Probing ${URL}/healthz"
+          # --retry covers the window where the Service exists but endpoints
+          # have not propagated yet; --fail turns any non-2xx into exit code 22
+          # so the test actually fails instead of printing an error page.
+          curl --fail --silent --show-error \
+               --retry 10 --retry-delay 3 --retry-connrefused \
+               --max-time 10 \
+               "${URL}/healthz"
+          echo
+          echo "==> Probing ${URL}/readyz"
+          curl --fail --silent --show-error --max-time 10 "${URL}/readyz"
+          echo
+          echo "==> Checking /metrics exposes demo_app_build_info"
+          curl --fail --silent --show-error --max-time 10 "${URL}/metrics" \
+            | grep -q '^demo_app_build_info'
+          echo "OK: demo_app_build_info present"
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL

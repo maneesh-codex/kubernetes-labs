@@ -1,0 +1,40 @@
+---
+# A PodDisruptionBudget constrains VOLUNTARY disruptions only: `kubectl drain`,
+# node-group rolling upgrades, Cluster Autoscaler scale-down, Karpenter
+# consolidation, descheduler evictions. It does NOT protect you from a node
+# hard-failing, an OOM kill, or a Pod being preempted - those are involuntary
+# and no budget can veto them.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: demo-app
+  namespace: lab-06-autoscaling
+  labels:
+    app.kubernetes.io/name: demo-app
+    app.kubernetes.io/instance: lab-06
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  # Express the budget as a PERCENTAGE when an HPA owns the replica count.
+  # `minAvailable: 2` alongside `minReplicas: 2` is the classic deadlock: at the
+  # floor, zero Pods may be evicted, so a node drain hangs forever and your
+  # cluster upgrade stalls at 3am. maxUnavailable: 25% always permits at least
+  # one eviction once you are above 4 replicas, and Kubernetes rounds down but
+  # never to zero for maxUnavailable expressed as a percentage of >1 replicas.
+  #
+  # Sanity check the pairing whenever you touch either object:
+  #   minReplicas=2, maxUnavailable=25% -> 1 Pod evictable (25% of 2 = 0.5 -> 1)
+  #   replicas=10,   maxUnavailable=25% -> 2 Pods evictable
+  maxUnavailable: 25%
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-app
+      app.kubernetes.io/instance: lab-06
+  # unhealthyPodEvictionPolicy: AlwaysAllow (stable in 1.27+) lets the eviction
+  # API remove Pods that are already failing readiness even when the budget is
+  # exhausted. Without it, a Deployment stuck in CrashLoopBackOff can block a
+  # node drain indefinitely - the PDB is protecting Pods that are serving no
+  # traffic. This is one of the highest-value one-liners in the whole repo.
+  unhealthyPodEvictionPolicy: AlwaysAllow

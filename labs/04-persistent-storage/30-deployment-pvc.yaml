@@ -1,0 +1,182 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-pvc
+  namespace: lab-04-storage
+  labels:
+    app.kubernetes.io/name: demo-pvc
+    app.kubernetes.io/instance: lab-04
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  # ONE replica, deliberately. The PVC is ReadWriteOnce and backed by node-local
+  # storage, so a second replica scheduled to another node would sit Pending
+  # forever on a multi-node cluster. This is the fundamental reason a Deployment
+  # is the wrong shape for stateful work: all replicas share one PVC, or none
+  # can start. A StatefulSet (see 61-statefulset-demo.yaml) gives each replica
+  # its OWN volume, which is what you almost always actually want.
+  replicas: 1
+  revisionHistoryLimit: 5
+  minReadySeconds: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-pvc
+      app.kubernetes.io/instance: lab-04
+  strategy:
+    # Recreate, not RollingUpdate. With a RWO volume a rolling update would need
+    # the new pod to mount the volume before the old pod releases it, which
+    # deadlocks: the new pod cannot start, so the old one is never terminated.
+    # Recreate accepts a moment of downtime in exchange for actually working.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: demo-pvc
+        app.kubernetes.io/instance: lab-04
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: frontend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      terminationGracePeriodSeconds: 30
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # fsGroup is what makes the freshly provisioned volume writable. The
+        # provisioner creates the directory owned by root; the kubelet then
+        # chowns it to this GID and sets the setgid bit, so files created
+        # inside inherit the group. Without fsGroup, a non-root container gets
+        # EACCES on its own PersistentVolume - the single most common cause of
+        # a CrashLoopBackOff on first deploy of a stateful workload.
+        fsGroup: 65532
+        # OnRootMismatch skips the recursive chown when the top-level directory
+        # already has the right ownership. On a volume with millions of files
+        # the default (Always) can add minutes to every pod start.
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: demo-shared-data
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+      initContainers:
+        # The demo app is a read-only HTTP service and never writes to disk, so
+        # this init container supplies the write. It APPENDS a line on every
+        # pod start and then prints the whole file, which turns
+        # `kubectl logs <pod> -c record-start` into a visible history of every
+        # pod that has ever mounted this volume. Delete the pod, let it come
+        # back, and the file has grown - that is persistence, demonstrated.
+        - name: record-start
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              echo "$(date -Iseconds) started as pod=${POD_NAME} on node=${NODE_NAME}" \
+                >> /data/history.log
+              echo "--- /data/history.log (all pods that have ever mounted this PVC) ---"
+              cat /data/history.log
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      containers:
+        - name: demo
+          image: ghcr.io/maneeshm/k8s-labs-demo:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: GREETING
+              value: "Deployment with a standalone ReadWriteOnce PVC at /data"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            # A volumeMount is writable even under readOnlyRootFilesystem: true.
+            # That flag makes the IMAGE layers read-only; mounted volumes are
+            # separate filesystems and are governed by their own readOnly flag.
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

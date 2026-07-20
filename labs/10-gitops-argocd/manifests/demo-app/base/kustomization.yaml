@@ -1,0 +1,52 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The base holds the environment-INDEPENDENT truth about this application.
+# Anything that differs between dev and prod belongs in an overlay, not here.
+# A base with an `if prod` shaped comment in it has already gone wrong.
+
+resources:
+  - service.yaml
+  - deployment.yaml
+  # Argo CD sync hooks. These are ordinary Jobs; the hook annotations are what
+  # make Argo run them out-of-band rather than treating them as app resources.
+  # `kubectl apply -k` would run them as plain Jobs, which is a useful way to
+  # test them without a sync.
+  - presync-job.yaml
+  - postsync-job.yaml
+
+# The ConfigMap is GENERATED rather than checked in as a plain resource, and
+# that choice is load-bearing. A generated ConfigMap gets a content-hash suffix
+# appended to its name, and Kustomize rewrites every reference to it -- so
+# changing a value here produces a new ConfigMap name, which changes the pod
+# template, which rolls the pods. A plain checked-in ConfigMap is updated in
+# place and the running pods keep their old environment forever.
+#
+# This is exactly the problem lab 08 solves in Helm with a checksum/config
+# annotation. Same failure, two ecosystems, two idioms.
+#
+# It also means overlays can use `behavior: merge` to override individual keys
+# without restating the whole map.
+configMapGenerator:
+  - name: demo-app-config
+    literals:
+      - LOG_LEVEL=info
+      - APP_TIER=base
+      - FEATURE_FLAG_BETA=false
+
+# Labels applied to every resource AND to the Deployment's selector.
+# `includeSelectors: false` is deliberate: a Deployment's spec.selector is
+# immutable, so if Kustomize injected a changing label there, the next apply
+# would fail permanently with "field is immutable". Common labels are for
+# identification; selector labels are a contract.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: kubernetes-labs
+    includeSelectors: false
+
+images:
+  # Declaring the image here rather than only in deployment.yaml gives the
+  # overlays (and Argo CD Image Updater) a single, structured field to patch.
+  - name: ghcr.io/maneeshm/k8s-labs-demo
+    newTag: "1.0.0"

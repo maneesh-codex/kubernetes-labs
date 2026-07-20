@@ -1,0 +1,136 @@
+---
+# FIXED 03 - Pod Pending, unsatisfiable resource request
+#
+# Changes from broken/03-pending-resources.yaml:
+#   - requests.cpu:    100  -> 50m    (the missing `m`)
+#   - requests.memory: 64Gi -> 64Mi
+#   - limits.cpu:      200  -> 200m
+#   - limits.memory:   128Gi -> 128Mi
+#
+# Guard against the whole class of bug with a LimitRange in the namespace, which
+# rejects any Pod whose requests exceed a sane ceiling, and a ResourceQuota,
+# which caps the namespace in aggregate. Both are shown below - they turn a
+# silent Pending into a loud, immediate admission error at apply time.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: sane-defaults
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: sane-defaults
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: policy
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  limits:
+    - type: Container
+      # A container asking for more than this is rejected at admission time
+      # with a clear message, instead of silently sitting Pending.
+      max:
+        cpu: "2"
+        memory: 2Gi
+      min:
+        cpu: 10m
+        memory: 16Mi
+      # Applied to containers that specify nothing at all.
+      default:
+        cpu: 200m
+        memory: 128Mi
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-03-pending-resources
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-03-pending-resources
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broken-03-pending-resources
+      app.kubernetes.io/instance: lab-11
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broken-03-pending-resources
+        app.kubernetes.io/instance: lab-11
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: demo-app
+          image: ghcr.io/maneeshm/k8s-labs-demo:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

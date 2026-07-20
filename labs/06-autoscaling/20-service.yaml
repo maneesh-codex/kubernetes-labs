@@ -1,0 +1,23 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-app
+  namespace: lab-06-autoscaling
+  labels:
+    app.kubernetes.io/name: demo-app
+    app.kubernetes.io/instance: lab-06
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: demo-app
+    app.kubernetes.io/instance: lab-06
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

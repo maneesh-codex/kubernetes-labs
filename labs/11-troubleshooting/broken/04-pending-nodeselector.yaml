@@ -1,0 +1,125 @@
+---
+# BROKEN SCENARIO 04 - Pod Pending, nodeSelector / affinity matches no node
+#
+# Same symptom as scenario 03 (Pending), completely different cause. Learning to
+# tell them apart from the FailedScheduling message is the whole exercise:
+#   "Insufficient cpu"                   -> not enough capacity (scenario 03)
+#   "didn't match Pod's node affinity/selector" -> no eligible node (this one)
+#   "had untolerated taint"              -> eligible node, but tainted
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-04-pending-nodeselector
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-04-pending-nodeselector
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broken-04-pending-nodeselector
+      app.kubernetes.io/instance: lab-11
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broken-04-pending-nodeselector
+        app.kubernetes.io/instance: lab-11
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      # BUG 1: no node in a kind cluster carries these labels. On EKS they would
+      # be real (`eks.amazonaws.com/nodegroup`, `node.kubernetes.io/instance-type`),
+      # which is precisely how this reaches production: the manifest is correct
+      # for the cluster it was written against and wrong everywhere else.
+      nodeSelector:
+        node.kubernetes.io/instance-type: p4d.24xlarge
+        workload-class: gpu-training
+      affinity:
+        nodeAffinity:
+          # BUG 2: `required...` is a hard constraint. Nothing satisfies it, so
+          # the Pod stays Pending forever. `preferredDuringScheduling...` would
+          # degrade gracefully instead.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/zone
+                    operator: In
+                    values: ["eu-west-1a", "eu-west-1b"]
+      # BUG 3: even if a matching node existed, this toleration is for a taint
+      # nothing in a kind cluster has - harmless on its own, but a reminder that
+      # tolerations do not *attract* Pods, they only permit them.
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: demo-app
+          image: ghcr.io/maneeshm/k8s-labs-demo:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

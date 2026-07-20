@@ -1,0 +1,152 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app
+  namespace: lab-05-rbac
+  labels:
+    app.kubernetes.io/name: demo-app
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-app
+      app.kubernetes.io/instance: lab-05
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: demo-app
+        app.kubernetes.io/instance: lab-05
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      # THE line that makes this lab work. Without it the Pod runs as
+      # `default`, inherits whatever that SA happens to be bound to, and your
+      # carefully written Role does nothing.
+      serviceAccountName: demo-app
+      # Pod-level opt-in. Even with this true, the projected volume below is
+      # what we actually read - see the walkthrough for why.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: demo-app
+          image: ghcr.io/maneeshm/k8s-labs-demo:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: demo-app-config
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: bound-sa-token
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # ----------------------------------------------------------------------
+        # Bound (projected) ServiceAccount token - the modern pattern.
+        # ----------------------------------------------------------------------
+        # The kubelet requests this token from the TokenRequest API, hands it to
+        # the container, and refreshes it in place at ~80% of its lifetime. It
+        # differs from the legacy Secret-based token in four ways that all
+        # matter:
+        #
+        #   1. AUDIENCE-BOUND. `audience` lands in the JWT `aud` claim. A token
+        #      minted for "lab-05-demo" is rejected by the API server (which
+        #      only accepts its own audience) and by any other service that
+        #      checks aud. A leaked token is therefore useful in one place only.
+        #   2. TIME-BOUND. It expires. A legacy Secret token was valid forever -
+        #      exfiltrate it once and you had a permanent cluster credential.
+        #   3. OBJECT-BOUND. The token embeds the Pod's UID. When the Pod is
+        #      deleted the token stops authenticating, even before expiry.
+        #   4. NOT AT REST IN etcd. There is no Secret object to `kubectl get`,
+        #      so "read all Secrets in the namespace" no longer means "become
+        #      every workload in the namespace".
+        #
+        # Since Kubernetes 1.24 no Secret token is auto-created for an SA at
+        # all, and since 1.29 legacy tokens that go unused are auto-purged.
+        - name: bound-sa-token
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: lab-05-demo
+                  # 1 hour. The kubelet rotates well before this; the value is
+                  # the ceiling on how long a stolen copy stays useful.
+                  expirationSeconds: 3600
+              # Projecting these alongside the token gives the workload
+              # everything an API client needs without a second mount.
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+        # readOnlyRootFilesystem means the app needs somewhere writable for
+        # scratch files. An emptyDir with a memory medium never touches disk.
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

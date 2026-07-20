@@ -1,0 +1,19 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "demo-app.fullname" . }}
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    # The port NAME matters as much as the number. A ServiceMonitor selects an
+    # endpoint by port name, not by port number, so renaming this breaks
+    # metrics scraping silently. See lab 09.
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "demo-app.selectorLabels" . | nindent 4 }}

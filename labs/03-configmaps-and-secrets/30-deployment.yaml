@@ -1,0 +1,208 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-config
+  namespace: lab-03-config
+  labels:
+    app.kubernetes.io/name: demo-config
+    app.kubernetes.io/instance: lab-03
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  minReadySeconds: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-config
+      app.kubernetes.io/instance: lab-03
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      annotations:
+        # THE CHECKSUM TRICK.
+        #
+        # Changing a ConfigMap or Secret does NOT restart pods and does NOT
+        # trigger a rollout - the Deployment controller only reacts to changes
+        # in the pod TEMPLATE. Env vars are therefore frozen at the value they
+        # had when the container exec'd, which is how a config change silently
+        # fails to take effect and nobody notices for a week.
+        #
+        # Hashing the config into a template annotation makes the template
+        # change whenever the config changes, so a normal `kubectl apply` rolls
+        # the fleet automatically. Helm writes this as:
+        #   checksum/config: {{ include (print $.Template.BasePath "/cm.yaml") . | sha256sum }}
+        # Kustomize solves the same problem with configMapGenerator, which
+        # appends a content hash to the ConfigMap NAME instead.
+        #
+        # Regenerate these after editing the source files:
+        #   shasum -a 256 10-configmap-app.yaml 20-secret.yaml
+        checksum/config: "135cce5701df8da8e3caf764c8a0c2cb32ec2b041dbd9389fc1ac03be695b25f"
+        checksum/secret: "28678e8a46277c5a916c80466caeeb802d088254ba04f21e1e4a7d318f1c9602"
+      labels:
+        app.kubernetes.io/name: demo-config
+        app.kubernetes.io/instance: lab-03
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      terminationGracePeriodSeconds: 30
+      # automountServiceAccountToken is defaulted to true and projects a real
+      # cluster credential into every pod. This app never calls the API server,
+      # so turning it off removes a credential an attacker could otherwise use
+      # to enumerate the cluster from a compromised container.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # fsGroup makes the projected config and secret files group-readable by
+        # 65532. Without it, a defaultMode of 0400 on a root-owned file would
+        # be unreadable by the non-root process that needs it.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        # Whole-ConfigMap mount: every key becomes a file under /etc/demo.
+        - name: config
+          configMap:
+            name: demo-config
+            defaultMode: 0444
+            # Projecting only the file-shaped keys keeps the scalar env keys
+            # (GREETING, LOG_LEVEL, ...) from also appearing as stray files.
+            items:
+              - key: app.properties
+                path: app.properties
+              - key: proxy.conf
+                path: proxy.conf
+        - name: secret
+          secret:
+            secretName: demo-secret
+            # THE 0400 TRAP. The instinct is to write defaultMode: 0400 -
+            # "readable by the owner only" - and it does not work under a
+            # non-root securityContext.
+            #
+            # The kubelet projects secret files owned by root:<fsGroup>, NOT by
+            # runAsUser. With 0400 the only reader is root, and this container
+            # runs as 65532, so every read fails with EACCES. 0440 grants the
+            # fsGroup read access, which is the tightest mode that actually
+            # works. Nothing can write it either way - the mount is readOnly
+            # and the volume is tmpfs-backed, so contents never touch node disk.
+            defaultMode: 0440
+            items:
+              - key: credentials.ini
+                path: credentials.ini
+        # readOnlyRootFilesystem: true means / is immutable, so anything that
+        # needs scratch space needs an explicit writable volume. /tmp is the
+        # usual one: Go's os.CreateTemp, TLS session caches, and most libraries
+        # assume it exists and is writable.
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+      containers:
+        - name: demo
+          image: ghcr.io/maneeshm/k8s-labs-demo:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          # envFrom pulls in EVERY key of the ConfigMap as an env var. It is
+          # convenient and it is a trap: the file-shaped keys (app.properties,
+          # proxy.conf) come along too, as multi-line env vars. Real manifests
+          # should split file keys into their own ConfigMap, or use explicit
+          # valueFrom entries. It is left here deliberately so `kubectl exec
+          # -- env` shows you the mess it makes.
+          envFrom:
+            - configMapRef:
+                name: demo-config
+            - configMapRef:
+                name: demo-build-info-v1
+          env:
+            # Individual valueFrom entries are the precise alternative. They
+            # also let you RENAME a key on the way in, which envFrom cannot do.
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: demo-config
+                  key: LOG_LEVEL
+            - name: APP_BUILD_COMMIT
+              valueFrom:
+                configMapKeyRef:
+                  name: demo-build-info-v1
+                  key: BUILD_COMMIT
+            # The secret as an env var. Convenient, and the weaker of the two
+            # options - see the mounted file at /etc/demo-secret for the form
+            # you should prefer in production.
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: demo-secret
+                  key: API_KEY
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: config
+              mountPath: /etc/demo
+              readOnly: true
+            - name: secret
+              mountPath: /etc/demo-secret
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

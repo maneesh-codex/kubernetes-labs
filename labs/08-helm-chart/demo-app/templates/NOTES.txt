@@ -1,0 +1,101 @@
+demo-app {{ .Chart.Version }} is installed as release "{{ .Release.Name }}"
+in namespace "{{ .Release.Namespace }}".
+
+Running image: {{ include "demo-app.image" . }}
+{{- if .Values.autoscaling.enabled }}
+Replicas:      managed by HorizontalPodAutoscaler ({{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }})
+{{- else }}
+Replicas:      {{ .Values.replicaCount }} (fixed)
+{{- end }}
+
+1. Wait for the rollout to finish:
+
+   kubectl rollout status deployment/{{ include "demo-app.fullname" . }} \
+     --namespace {{ .Release.Namespace }} --timeout=120s
+
+2. Reach the application:
+
+{{- if .Values.ingress.enabled }}
+   An Ingress was created on IngressClass "{{ .Values.ingress.className }}".
+{{- range $host := .Values.ingress.hosts }}
+{{- range .paths }}
+   http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+{{- end }}
+{{- end }}
+
+   If that hostname does not resolve, add it to /etc/hosts pointing at your
+   ingress controller's address, or curl with an explicit Host header:
+
+     curl -H 'Host: {{ (first .Values.ingress.hosts).host }}' http://localhost/
+{{- else if contains "LoadBalancer" .Values.service.type }}
+   A LoadBalancer Service was created. Provisioning the external address can
+   take a couple of minutes -- watch it with:
+
+     kubectl get svc {{ include "demo-app.fullname" . }} \
+       --namespace {{ .Release.Namespace }} -w
+
+   Then:
+
+     export SERVICE_IP=$(kubectl get svc {{ include "demo-app.fullname" . }} \
+       --namespace {{ .Release.Namespace }} \
+       -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+     curl "http://${SERVICE_IP}:{{ .Values.service.port }}/"
+{{- else if contains "NodePort" .Values.service.type }}
+   A NodePort Service was created:
+
+     export NODE_PORT=$(kubectl get svc {{ include "demo-app.fullname" . }} \
+       --namespace {{ .Release.Namespace }} -o jsonpath='{.spec.ports[0].nodePort}')
+     export NODE_IP=$(kubectl get nodes \
+       -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+     curl "http://${NODE_IP}:${NODE_PORT}/"
+{{- else }}
+   The Service is ClusterIP, so port-forward to reach it from your laptop:
+
+     kubectl port-forward --namespace {{ .Release.Namespace }} \
+       svc/{{ include "demo-app.fullname" . }} 8080:{{ .Values.service.port }}
+
+   Then in another terminal:
+
+     curl http://localhost:8080/
+     curl http://localhost:8080/api/info
+     curl http://localhost:8080/metrics
+{{- end }}
+
+3. Verify the release:
+
+   helm test {{ .Release.Name }} --namespace {{ .Release.Namespace }}
+
+{{- if .Values.serviceMonitor.enabled }}
+
+4. Metrics: a ServiceMonitor was requested.
+{{- if .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" }}
+   The monitoring.coreos.com/v1 API is present, so it was created. Confirm the
+   target appears in Prometheus under Status > Targets. If it does not, the
+   usual cause is Prometheus' serviceMonitorSelector not matching the label
+   {{ range $k, $v := .Values.serviceMonitor.labels }}{{ $k }}={{ $v }} {{ end }}-- see lab 09.
+{{- else }}
+   WARNING: monitoring.coreos.com/v1 is NOT available on this cluster, so the
+   ServiceMonitor was SKIPPED. Install kube-prometheus-stack first (lab 09),
+   then re-run `helm upgrade`.
+{{- end }}
+{{- end }}
+
+{{- if .Values.secrets }}
+
+SECURITY NOTE: this release rendered a Secret from chart values. That is fine
+for a lab, but in production those values are visible to anyone who can read
+the Helm release secret or the CI logs that rendered it. Use External Secrets
+Operator with AWS Secrets Manager, or Sealed Secrets, instead.
+{{- end }}
+
+{{- if and (not .Values.autoscaling.enabled) (lt (int .Values.replicaCount) 2) }}
+
+WARNING: replicaCount is {{ .Values.replicaCount }}. A single replica means every node drain,
+rollout and node upgrade is a full outage for this service.
+{{- end }}
+
+Useful follow-ups:
+
+   helm get values {{ .Release.Name }} -n {{ .Release.Namespace }}
+   helm get manifest {{ .Release.Name }} -n {{ .Release.Namespace }}
+   helm history {{ .Release.Name }} -n {{ .Release.Namespace }}

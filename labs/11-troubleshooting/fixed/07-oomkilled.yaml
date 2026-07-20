@@ -1,0 +1,129 @@
+---
+# FIXED 07 - OOMKilled
+#
+# Changes from broken/07-oomkilled.yaml:
+#   - limits.memory:  32Mi -> 256Mi   (headroom above the real working set)
+#   - requests.memory: 32Mi -> 128Mi  (so the scheduler reserves what we use)
+#   - The workload now writes 100MiB, comfortably inside the limit.
+#   - emptyDir sizeLimit reduced to 128Mi so the tmpfs quota, not the OOM
+#     killer, is the backstop - a "No space left on device" error is far easier
+#     to diagnose than a SIGKILL.
+#
+# How to pick the numbers rather than guessing:
+#   1. Run under load and measure: `kubectl top pod`, or better, the
+#      container_memory_working_set_bytes series from cAdvisor over a week.
+#   2. Set requests near the p90 of the working set.
+#   3. Set limits ~2x the p99, so a transient spike does not kill the process.
+#   4. Alert on `container_memory_working_set_bytes / limit > 0.9` BEFORE the
+#      kill, and on `kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}`
+#      after it. The second one is how you notice OOM kills that a restart hid.
+#
+# For the JVM specifically: use -XX:MaxRAMPercentage=75 rather than a fixed
+# -Xmx, so the heap tracks the container limit. Go 1.19+ has GOMEMLIMIT, which
+# does the equivalent job for the GC.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-07-oomkilled
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-07-oomkilled
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broken-07-oomkilled
+      app.kubernetes.io/instance: lab-11
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broken-07-oomkilled
+        app.kubernetes.io/instance: lab-11
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "allocating 100MiB with a 256Mi memory limit - comfortable"
+              dd if=/dev/zero of=/cache/balloon bs=1M count=100
+              echo "allocation complete, staying up"
+              touch /tmp/ready
+              sleep infinity
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -f /tmp/ready"]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -f /tmp/ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -f /tmp/ready"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: cache
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

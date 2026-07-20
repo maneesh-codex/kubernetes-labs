@@ -1,0 +1,170 @@
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: demo-metrics
+  namespace: lab-09-observability
+  labels:
+    app.kubernetes.io/name: demo-metrics
+    app.kubernetes.io/instance: lab-09
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: alerting
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+    # Same discovery story as the ServiceMonitor: Prometheus selects
+    # PrometheusRule objects with `ruleSelector`, which kube-prometheus-stack
+    # also defaults to matching on the release label.
+    release: kube-prometheus-stack
+spec:
+  groups:
+    # RECORDING RULES. Evaluated on a schedule and written back as new series.
+    # Two reasons to use them: expensive expressions get computed once instead
+    # of on every dashboard refresh, and alerts stay readable. A recorded series
+    # is also what you would keep long-term while downsampling the raw metric.
+    - name: demo-app.recording
+      interval: 30s
+      rules:
+        - record: demo_app:http_requests:rate5m
+          expr: sum by (namespace, service, method, path, status) (rate(demo_app_http_requests_total[5m]))
+
+        - record: demo_app:http_request_duration_seconds:p99
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (namespace, service, path, le) (
+                rate(demo_app_http_request_duration_seconds_bucket[5m])
+              )
+            )
+
+        - record: demo_app:http_requests_error_ratio:rate5m
+          expr: |
+            sum by (namespace, service) (
+              rate(demo_app_http_requests_total{status=~"5.."}[5m])
+            )
+            /
+            sum by (namespace, service) (
+              rate(demo_app_http_requests_total[5m])
+            )
+
+    - name: demo-app.alerts
+      rules:
+        # Readiness. `demo_app_ready` flips to 0 when POST /toggle-ready is
+        # called, which makes this alert trivially reproducible in the lab.
+        #
+        # `for: 2m` is what separates an alert from a nuisance: a single failed
+        # scrape or a pod restarting during a normal rollout resolves well
+        # inside two minutes and never pages anyone.
+        - alert: DemoAppNotReady
+          expr: demo_app_ready == 0
+          for: 2m
+          labels:
+            severity: warning
+            team: platform
+            service: demo-metrics
+          annotations:
+            summary: "demo-app pod {{ $labels.pod }} has been not-ready for 2 minutes"
+            description: >-
+              Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} reports
+              demo_app_ready=0. It has been removed from Service endpoints, so
+              capacity is reduced but traffic is not being errored. Current
+              value: {{ $value }}.
+            runbook_url: "https://github.com/maneeshm/kubernetes-labs/blob/main/labs/09-observability/README.md#demoappnotready"
+
+        # Error rate as a RATIO, not a count. Alerting on absolute 5xx count
+        # means the threshold is wrong at every traffic level -- fine at 3am,
+        # screaming at peak. A ratio is scale-invariant.
+        #
+        # The `> 1` guard on the denominator suppresses the classic division
+        # noise: at very low traffic, two errors out of three requests is a 66%
+        # error rate that nobody should be woken for.
+        - alert: DemoAppHighErrorRate
+          expr: |
+            (
+              sum by (namespace, service) (
+                rate(demo_app_http_requests_total{status=~"5.."}[5m])
+              )
+              /
+              sum by (namespace, service) (
+                rate(demo_app_http_requests_total[5m])
+              )
+            ) > 0.05
+            and
+            sum by (namespace, service) (rate(demo_app_http_requests_total[5m])) > 1
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+            service: demo-metrics
+          annotations:
+            summary: "demo-app 5xx error ratio above 5% in {{ $labels.namespace }}"
+            description: >-
+              Service {{ $labels.service }} is returning
+              {{ $value | humanizePercentage }} 5xx responses over the last 5
+              minutes, sustained for 5 minutes. Check pod logs and recent
+              deployments.
+            runbook_url: "https://github.com/maneeshm/kubernetes-labs/blob/main/labs/09-observability/README.md#demoapphigherrorrate"
+
+        # p99 latency from the histogram. Note the ORDER of operations:
+        # rate() first, then sum by (le), then histogram_quantile. Doing
+        # histogram_quantile before summing computes a quantile per pod and then
+        # averages quantiles, which is statistically meaningless -- the average
+        # of three p99s is not the p99 of the fleet.
+        - alert: DemoAppHighLatency
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (namespace, service, le) (
+                rate(demo_app_http_request_duration_seconds_bucket[5m])
+              )
+            ) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+            service: demo-metrics
+          annotations:
+            summary: "demo-app p99 latency above 500ms in {{ $labels.namespace }}"
+            description: >-
+              p99 request latency for {{ $labels.service }} is
+              {{ $value | humanizeDuration }}, above the 500ms objective, for 5
+              minutes. Drive /burn in the lab to reproduce this deliberately.
+            runbook_url: "https://github.com/maneeshm/kubernetes-labs/blob/main/labs/09-observability/README.md#demoapphighlatency"
+
+        # ABSENCE alert. Every other rule here fires on a bad value; this one
+        # fires when there is no value at all. Without it, deleting the Service,
+        # renaming its port or breaking the ServiceMonitor selector makes all
+        # the alerts above go permanently silent -- which looks exactly like
+        # everything being healthy.
+        - alert: DemoAppTargetMissing
+          expr: absent(demo_app_ready{namespace="lab-09-observability"})
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+            service: demo-metrics
+          annotations:
+            summary: "Prometheus is not scraping demo-app in lab-09-observability"
+            description: >-
+              No demo_app_ready samples have arrived for 5 minutes. Either the
+              workload is gone or service discovery is broken. Check
+              Status > Targets, then the ServiceMonitor's selector and the
+              Service's port NAME.
+            runbook_url: "https://github.com/maneeshm/kubernetes-labs/blob/main/labs/09-observability/README.md#demoapptargetmissing"
+
+        # CPU burn is a counter, so any nonzero rate means someone is hitting
+        # /burn. Included to demonstrate alerting on a counter's rate rather
+        # than its raw (monotonically increasing, useless) value.
+        - alert: DemoAppSustainedCPUBurn
+          expr: rate(demo_app_cpu_burn_seconds_total[5m]) > 0.5
+          for: 10m
+          labels:
+            severity: info
+            team: platform
+            service: demo-metrics
+          annotations:
+            summary: "demo-app is burning CPU synthetically on {{ $labels.pod }}"
+            description: >-
+              demo_app_cpu_burn_seconds_total is increasing at
+              {{ $value }} seconds/second on pod {{ $labels.pod }}. Expected
+              during the lab's load-generation step; unexpected otherwise.
+            runbook_url: "https://github.com/maneeshm/kubernetes-labs/blob/main/labs/09-observability/README.md#demoappsustainedcpuburn"

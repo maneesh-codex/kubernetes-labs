@@ -1,0 +1,140 @@
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: demo-app
+  namespace: lab-06-autoscaling
+  labels:
+    app.kubernetes.io/name: demo-app
+    app.kubernetes.io/instance: lab-06
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: demo-app
+  # minReplicas 2, not 1: a single replica has no availability story at all, and
+  # scaling 1 -> 2 under load is the slowest scale event you will ever have
+  # (you are at 100% capacity before the second Pod is even scheduled).
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    # ------------------------------------------------------------------------
+    # CPU: the workhorse metric.
+    # ------------------------------------------------------------------------
+    # `Utilization` is a percentage OF THE REQUEST, not of the node or the
+    # limit. With requests.cpu = 100m, a 60% target means the HPA aims to keep
+    # each Pod at ~60m of actual CPU. Do the arithmetic before you ship:
+    #
+    #   2 replicas, each at 300m actual -> utilisation 300%
+    #   desired = ceil(2 * 300 / 60) = ceil(10) = 10  -> capped at maxReplicas
+    #
+    # 60% leaves 40% headroom to absorb a burst during the ~15-60s it takes to
+    # schedule, pull, start and pass readiness for a new Pod. Targets above ~80%
+    # mean you are already saturated by the time the HPA reacts.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+    # ------------------------------------------------------------------------
+    # Memory: the honest caveat.
+    # ------------------------------------------------------------------------
+    # Included because you asked for it and because it is instructive - but
+    # scaling on memory is usually WRONG. Adding replicas does not reduce the
+    # memory each existing Pod is already holding: a JVM heap or a Go process
+    # that has grown will not shrink because a sibling appeared. Memory-based
+    # HPAs therefore tend to ratchet upward and never scale back down.
+    #
+    # It earns its place when memory is genuinely proportional to concurrent
+    # work (per-request buffers, streaming, caches sized to in-flight requests),
+    # and as a coarse safety valve well above steady state. The HPA takes the
+    # MAXIMUM of the desired replica counts across all metrics, so this rule can
+    # only ever scale you up relative to the CPU rule - it can never hold you
+    # down. 75% of a 64Mi request = 48Mi.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
+    # ------------------------------------------------------------------------
+    # Custom / external metrics - the metric you actually want in production.
+    # ------------------------------------------------------------------------
+    # Requires an adapter implementing custom.metrics.k8s.io (prometheus-adapter)
+    # or external.metrics.k8s.io (KEDA, the CloudWatch adapter). Commented out
+    # because a bare kind cluster has neither, and an HPA referencing an
+    # unavailable metric API reports ScalingActive=False and refuses to scale on
+    # *any* metric.
+    #
+    # Queue depth or requests-per-second are far better scaling signals than CPU
+    # for request-driven services: they lead demand instead of lagging it.
+    #
+    # - type: Pods
+    #   pods:
+    #     metric:
+    #       name: demo_app_http_requests_per_second
+    #     target:
+    #       type: AverageValue
+    #       averageValue: "50"
+    #
+    # - type: External
+    #   external:
+    #     metric:
+    #       name: sqs_approximate_number_of_messages_visible
+    #       selector:
+    #         matchLabels:
+    #           queue_name: orders
+    #     target:
+    #       type: AverageValue
+    #       averageValue: "30"
+  # --------------------------------------------------------------------------
+  # behavior: the difference between an autoscaler and a thrash machine.
+  # --------------------------------------------------------------------------
+  # Added in autoscaling/v2. Without it you get the defaults: scale up fast
+  # (100% or 4 Pods per 15s, whichever is larger, no stabilisation) and scale
+  # down slowly (300s stabilisation window, 100% per 15s).
+  behavior:
+    scaleUp:
+      # 0 = react immediately. Scaling up late costs you an outage; scaling up
+      # early costs you a few minutes of a small instance. The asymmetry with
+      # scaleDown below is deliberate and is the single most important idea in
+      # this block.
+      stabilizationWindowSeconds: 0
+      # With multiple policies, `Max` picks the most permissive - i.e. the
+      # policy allowing the largest increase wins.
+      selectPolicy: Max
+      policies:
+        # Double the replica count every 30s...
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        # ...but always allow at least +4 Pods, so small deployments are not
+        # rate-limited by percentages (100% of 2 is only +2).
+        - type: Pods
+          value: 4
+          periodSeconds: 30
+    scaleDown:
+      # Look back over 5 minutes and use the HIGHEST recommendation in that
+      # window. This is what prevents flapping: a 30-second dip in traffic will
+      # not tear down capacity you are about to need again. Watch for this in
+      # the walkthrough - after load stops, replicas sit still for ~5 minutes
+      # before dropping. That pause is the feature, not a bug.
+      stabilizationWindowSeconds: 300
+      # `Min` picks the most conservative policy - the one that removes the
+      # fewest Pods.
+      selectPolicy: Min
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+      # To disable scale-down entirely (useful for stateful consumers that are
+      # expensive to rebalance), replace the policies above with:
+      #   selectPolicy: Disabled

@@ -1,0 +1,19 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lab-04-storage
+  labels:
+    app.kubernetes.io/name: lab-04-storage
+    app.kubernetes.io/instance: lab-04
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: namespace
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+    # The postgres container needs a writable root filesystem, which the
+    # restricted profile permits - restricted governs privilege escalation,
+    # capabilities, seccomp, and runAsNonRoot, not filesystem writability.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

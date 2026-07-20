@@ -1,0 +1,238 @@
+---
+# Default values for the demo-app chart.
+# Every key below is documented; the chart README renders the same table.
+# Override with `-f my-values.yaml` (preferred, reviewable in git) rather than
+# a long tail of `--set` flags.
+
+# -- Number of Deployment replicas. Ignored entirely when
+# `autoscaling.enabled` is true, because leaving `replicas` in the manifest
+# fights the HPA: every `helm upgrade` would reset the replica count back to
+# this number and the HPA would scale it out again.
+replicaCount: 2
+
+image:
+  # -- Container image repository. No tag here -- see `image.tag`.
+  repository: ghcr.io/maneeshm/k8s-labs-demo
+  # -- Image tag. Defaults to the chart's appVersion when left empty, which
+  # keeps `helm upgrade --version` as the single source of truth for what runs.
+  tag: "1.0.0"
+  # -- IfNotPresent so a `kind load docker-image` sideloaded image is used
+  # instead of being re-pulled from a registry the kind node cannot reach.
+  pullPolicy: IfNotPresent
+
+# -- Secrets used to pull from a private registry, e.g.
+# `[{name: ghcr-credentials}]`. The Secret must already exist in the release
+# namespace; this chart does not create it (pull secrets are cluster-operator
+# territory, not app-chart territory).
+imagePullSecrets: []
+
+# -- Override the generated resource name suffix (the `.Chart.Name` part).
+nameOverride: ""
+# -- Replace the generated resource name entirely. Use sparingly: it breaks the
+# release-name-scoping that lets two releases of this chart coexist.
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Create a dedicated ServiceAccount. Always prefer this over `default`:
+  # the default SA is shared by everything in the namespace, so you cannot
+  # grant it a permission without granting it to every pod there.
+  create: true
+  # -- Annotations for the ServiceAccount. On EKS this is where IRSA lands:
+  # `eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/demo-app`.
+  annotations: {}
+  # -- Name to use. Generated from the fullname template when empty.
+  name: ""
+  # -- Mount the SA token into pods. This app never calls the Kubernetes API,
+  # so the token is pure attack surface -- leave it false.
+  automount: false
+
+# -- Extra annotations for every pod. `checksum/config` and `checksum/secret`
+# are added automatically on top of these.
+podAnnotations: {}
+
+# -- Extra labels for every pod, merged after the standard selector labels.
+podLabels: {}
+
+# -- Pod-level security context. These five settings are what the `restricted`
+# Pod Security Standard checks for. 65532 is the `nonroot` UID baked into
+# distroless and Chainguard base images.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context. `readOnlyRootFilesystem: true` is the
+# high-value one: it turns "attacker got RCE" into "attacker got RCE and cannot
+# write a payload to disk". If the app needs scratch space, mount an emptyDir
+# via `extraVolumes` rather than relaxing this.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  # -- Service type. ClusterIP for anything behind an Ingress. LoadBalancer on
+  # EKS provisions a real NLB/ALB and a real monthly bill -- do that once, at
+  # the edge, not per service.
+  type: ClusterIP
+  # -- Service port. The target port is always the container's named `http`
+  # port, so this can differ from 8080 freely.
+  port: 8080
+
+ingress:
+  # -- Enable the Ingress object.
+  enabled: false
+  # -- IngressClass name. `nginx` for the kind lab, `alb` for the AWS Load
+  # Balancer Controller on EKS.
+  className: nginx
+  # -- Ingress annotations. This is where controller-specific configuration
+  # lives (ALB scheme, certificate ARN, health check path, and so on).
+  annotations: {}
+  hosts:
+    - host: demo-app.local
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- TLS blocks. Each needs a Secret of type kubernetes.io/tls in the release
+  # namespace, usually produced by cert-manager.
+  tls: []
+
+# -- Compute resources. Requests drive scheduling and the HPA denominator;
+# limits cap the blast radius of a runaway pod. Setting a memory limit equal to
+# the request makes the pod Guaranteed QoS; here they differ deliberately so
+# the pod is Burstable and the lab can demonstrate eviction ordering.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+autoscaling:
+  # -- Enable a HorizontalPodAutoscaler. When true the Deployment omits
+  # `replicas` so Helm and the HPA stop fighting over it.
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  # -- Target average CPU utilisation, as a percentage of the CPU *request*.
+  # With a 50m request, 80% means the HPA scales out at 40m of actual usage.
+  targetCPUUtilizationPercentage: 80
+  # -- Target average memory utilisation. Set to null/omit to drop the memory
+  # metric; memory rarely falls when you add replicas, so CPU-only is the
+  # safer default for most stateless services.
+  targetMemoryUtilizationPercentage: 80
+
+pdb:
+  # -- Create a PodDisruptionBudget. This constrains *voluntary* disruption
+  # only -- node drains, cluster upgrades, karpenter consolidation. It does
+  # nothing for a node that simply dies.
+  enabled: true
+  # -- Keep at least this many pods up during a drain. Must be lower than the
+  # replica count or the drain blocks forever.
+  minAvailable: 1
+
+# -- Node selector for pod placement.
+nodeSelector: {}
+
+# -- Tolerations for tainted nodes, e.g. spot or GPU pools.
+tolerations: []
+
+# -- Affinity rules. Prefer `topologySpreadConstraints` below for the common
+# "spread my replicas out" case -- it is far easier to reason about.
+affinity: {}
+
+# -- Spread replicas across nodes. `ScheduleAnyway` keeps this working on a
+# single-node kind cluster; on multi-AZ EKS switch to `DoNotSchedule` and add a
+# second constraint on `topology.kubernetes.io/zone`.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+
+# -- Literal environment variables, as a list of name/value pairs. Downward API
+# variables (POD_NAME, NODE_NAME, POD_NAMESPACE) are always injected by the
+# template and do not need to be listed here.
+env:
+  - name: GREETING
+    value: "Hello from Helm"
+
+# -- Extra envFrom sources, e.g. an externally managed ConfigMap or the Secret
+# produced by External Secrets Operator.
+envFrom: []
+
+# -- Rendered verbatim into a ConfigMap and exposed to the container via
+# envFrom. Keys become environment variable names, so keep them SHOUTY_SNAKE.
+config:
+  LOG_LEVEL: info
+  FEATURE_FLAG_BETA: "false"
+  APP_TIER: lab
+
+# -- Rendered into a Secret (base64-encoded by Helm) and exposed via envFrom.
+# THIS IS FOR LAB USE ONLY. Values placed here end up in the Helm release
+# secret in plaintext-adjacent form and in your shell history. In production
+# leave this empty and use External Secrets Operator or Sealed Secrets --
+# see the lab README.
+secrets:
+  API_KEY: "lab-only-not-a-real-secret"
+
+# -- Liveness probe. "Is this process wedged?" A failure restarts the
+# container, so it must never depend on a downstream service: a database blip
+# would then restart every pod at once and turn a partial outage into a total
+# one.
+livenessProbe:
+  enabled: true
+  path: /healthz
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+  successThreshold: 1
+
+# -- Readiness probe. "Should this pod receive traffic?" A failure only removes
+# the pod from Service endpoints, which is cheap and reversible -- so this one
+# *may* check dependencies.
+readinessProbe:
+  enabled: true
+  path: /readyz
+  initialDelaySeconds: 3
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 3
+  successThreshold: 1
+
+serviceMonitor:
+  # -- Create a Prometheus Operator ServiceMonitor. The template additionally
+  # checks that the monitoring.coreos.com/v1 API actually exists, so enabling
+  # this on a cluster without the operator fails soft instead of erroring.
+  enabled: false
+  # -- Scrape interval. 15s is a reasonable default; every halving of this
+  # doubles your active series ingest cost on Amazon Managed Prometheus.
+  interval: 15s
+  scrapeTimeout: 10s
+  path: /metrics
+  # -- Extra labels. kube-prometheus-stack's Prometheus only selects
+  # ServiceMonitors carrying its own release label unless
+  # `serviceMonitorSelectorNilUsesHelmValues=false` is set. See lab 09.
+  labels:
+    release: kube-prometheus-stack
+
+# -- Additional volumes for the pod. The common case is an emptyDir for scratch
+# space, which lets you keep `readOnlyRootFilesystem: true`.
+extraVolumes: []
+
+# -- Additional volume mounts for the container.
+extraVolumeMounts: []
+
+# -- Grace period for shutdown. Must exceed the readiness probe period plus
+# kube-proxy's endpoint propagation delay, or in-flight requests get dropped
+# mid-rollout.
+terminationGracePeriodSeconds: 30
+
+# -- ReplicaSets to retain for rollback.
+revisionHistoryLimit: 5

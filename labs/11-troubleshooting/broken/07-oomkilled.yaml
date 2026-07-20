@@ -1,0 +1,107 @@
+---
+# BROKEN SCENARIO 07 - OOMKilled
+#
+# The container writes 200 MiB into a memory-backed emptyDir while its memory
+# limit is 32Mi. Pages in a `medium: Memory` emptyDir (tmpfs) are charged to the
+# container's memory cgroup, so the kernel OOM killer fires and the kubelet
+# records `Reason: OOMKilled, ExitCode: 137` (128 + SIGKILL).
+#
+# Deterministic and safe: the workload cannot consume more than its own limit,
+# so it cannot destabilise the node. Contrast with a *node-level* OOM, where the
+# node runs out of memory and the kubelet evicts Pods - a much worse day, and
+# one that resource requests exist to prevent.
+#
+# Key facts this teaches:
+#   * OOMKilled is driven by the memory LIMIT, not the request.
+#   * Exit code 137 is the fingerprint. 137 = 128 + 9 (SIGKILL).
+#   * The container is restarted, so you see CrashLoopBackOff eventually - and
+#     `kubectl logs` shows nothing useful, because SIGKILL cannot be caught and
+#     the process gets no chance to log its own death.
+#   * The evidence lives in `lastState.terminated`, not in the logs.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-07-oomkilled
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-07-oomkilled
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broken-07-oomkilled
+      app.kubernetes.io/instance: lab-11
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broken-07-oomkilled
+        app.kubernetes.io/instance: lab-11
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "allocating 200MiB into a tmpfs with a 32Mi memory limit"
+              dd if=/dev/zero of=/cache/balloon bs=1M count=200
+              echo "if you can read this line, the limit was not enforced"
+              sleep infinity
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              # BUG: 32Mi is far below what this workload actually needs. In
+              # production the equivalent is a JVM whose -Xmx exceeds the
+              # container limit, or a Go service sized from a load test that
+              # never exercised the large-request path.
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: cache
+          emptyDir:
+            medium: Memory
+            # sizeLimit is deliberately ABOVE the container memory limit, so the
+            # cgroup OOM killer fires before the tmpfs quota does. Swap the two
+            # and you would get "No space left on device" instead - a different
+            # bug with a much clearer error message.
+            sizeLimit: 256Mi

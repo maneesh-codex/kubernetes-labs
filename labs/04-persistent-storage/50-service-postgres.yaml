@@ -1,0 +1,67 @@
+---
+# The GOVERNING Service for the postgres StatefulSet.
+#
+# A StatefulSet's .spec.serviceName must name a headless Service, and that is
+# what creates the per-pod DNS records:
+#   postgres-0.postgres.lab-04-storage.svc.cluster.local
+#   postgres-1.postgres.lab-04-storage.svc.cluster.local
+#   postgres-2.postgres.lab-04-storage.svc.cluster.local
+#
+# Those names are STABLE across rescheduling, restarts, and IP changes, which
+# is the entire point: a replica can be configured to stream from a named
+# primary without any service discovery machinery.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: lab-04-storage
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/instance: lab-04
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  clusterIP: None
+  # Peers in a clustered database frequently must reach each other BEFORE any
+  # of them can report ready - a replica cannot finish bootstrapping until it
+  # can contact the primary. Publishing not-ready addresses breaks that
+  # deadlock. It also means DNS here is not a readiness signal: never point
+  # application traffic at this Service.
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/instance: lab-04
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+---
+# A conventional ClusterIP for CLIENTS. This one respects readiness, so it only
+# ever routes to a postgres pod that pg_isready has confirmed is accepting
+# connections. Applications use this name; the StatefulSet uses the headless
+# one above.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-client
+  namespace: lab-04-storage
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/instance: lab-04
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/instance: lab-04
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP

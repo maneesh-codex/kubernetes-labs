@@ -1,0 +1,265 @@
+---
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch - no point burning minutes on a
+# commit that has already been replaced.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  KUBERNETES_VERSION: "1.31.0"
+  KUBECONFORM_VERSION: "0.6.7"
+  CHART_DIR: labs/08-helm-chart/demo-app
+
+jobs:
+  # ---------------------------------------------------------------------------
+  yamllint:
+    name: yamllint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install yamllint
+        run: pip install --disable-pip-version-check yamllint==1.35.1
+
+      - name: Lint YAML
+        run: yamllint --strict .
+
+  # ---------------------------------------------------------------------------
+  kubeconform:
+    name: kubeconform (schema validation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSLo kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          tar xf kubeconform.tar.gz kubeconform
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+
+      - name: Validate manifests
+        run: |
+          # Excluded from schema validation:
+          #   - the Helm chart templates: Go templates, not valid YAML on their own
+          #   - kind/: a kind cluster config, not a Kubernetes API object
+          #   - .github/: GitHub Actions workflows
+          #   - */optional/*: manifests for CRDs that are not installed by
+          #     default (VerticalPodAutoscaler in lab 06). These are excluded by
+          #     path rather than leaning on -ignore-missing-schemas alone, so
+          #     that a genuine typo in a kind name elsewhere still fails the
+          #     build instead of being silently skipped.
+          # CRD-backed kinds that ARE part of the labs' happy path
+          # (ServiceMonitor, PrometheusRule, Application) resolve against the
+          # datreeio CRD catalog below.
+          #   - values*.yaml: Helm values files, which are inputs to a chart
+          #     rather than Kubernetes objects (no apiVersion/kind)
+          #   - dotfiles: .yamllint.yml and friends are tool config
+          files=$(find . -type f \( -name '*.yaml' -o -name '*.yml' \) \
+            -not -path './.git/*' \
+            -not -path './${{ env.CHART_DIR }}/*' \
+            -not -path './kind/*' \
+            -not -path './.github/*' \
+            -not -path '*/optional/*' \
+            -not -name 'values*.yaml' \
+            -not -name '.*')
+
+          echo "Validating $(echo "$files" | wc -l) files"
+          crd_catalog='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main'
+          crd_schema="${crd_catalog}/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
+
+          echo "$files" | xargs kubeconform \
+            -kubernetes-version "${KUBERNETES_VERSION}" \
+            -strict \
+            -ignore-missing-schemas \
+            -schema-location default \
+            -schema-location "${crd_schema}" \
+            -summary
+
+  # ---------------------------------------------------------------------------
+  helm:
+    name: helm lint and template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: helm lint
+        run: helm lint "${CHART_DIR}"
+
+      - name: helm lint (production values)
+        run: helm lint "${CHART_DIR}" --values labs/08-helm-chart/values-production.yaml
+
+      - name: helm template with default values
+        run: helm template demo-app "${CHART_DIR}" > /dev/null
+
+      - name: helm template with all optional features enabled
+        run: |
+          # Exercises the conditional templates that the default values skip:
+          # Ingress, HPA, PodDisruptionBudget and ServiceMonitor.
+          helm template demo-app "${CHART_DIR}" \
+            --set ingress.enabled=true \
+            --set autoscaling.enabled=true \
+            --set pdb.enabled=true \
+            --set serviceMonitor.enabled=true > /dev/null
+
+      - name: Schema-validate the rendered chart
+        run: |
+          curl -sSLo kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          tar xf kubeconform.tar.gz kubeconform
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+
+          # Rendering then validating catches template bugs that produce
+          # syntactically valid but schema-invalid output - the class of bug
+          # `helm lint` alone will happily wave through.
+          helm template demo-app "${CHART_DIR}" \
+            --set ingress.enabled=true \
+            --set autoscaling.enabled=true \
+            --set pdb.enabled=true \
+          | kubeconform \
+              -kubernetes-version "${KUBERNETES_VERSION}" \
+              -strict \
+              -ignore-missing-schemas \
+              -schema-location default \
+              -summary
+
+  # ---------------------------------------------------------------------------
+  app:
+    name: build demo app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: app/go.mod
+
+      - name: go vet
+        working-directory: app
+        run: go vet ./...
+
+      - name: gofmt check
+        working-directory: app
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Build
+        working-directory: app
+        run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tmp/demo-app .
+
+      - name: Smoke test the binary
+        working-directory: app
+        run: |
+          # Start the server, poll the probes, then shut it down. This catches
+          # the class of regression where the binary compiles but never binds.
+          PORT=18080 /tmp/demo-app &
+          pid=$!
+          for _ in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.5
+          done
+
+          curl -fsS http://127.0.0.1:18080/healthz | tee /dev/stderr | grep -q '"status":"ok"'
+          curl -fsS http://127.0.0.1:18080/readyz  | tee /dev/stderr | grep -q '"status":"ready"'
+          curl -fsS http://127.0.0.1:18080/metrics | grep -q '^demo_app_build_info'
+          curl -fsS http://127.0.0.1:18080/api/info | grep -q '"version"'
+
+          kill "$pid"
+
+      - name: Build the container image
+        run: docker build -t k8s-labs-demo:ci app/
+
+  # ---------------------------------------------------------------------------
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh
+
+  # ---------------------------------------------------------------------------
+  # An end-to-end smoke test: stand up a real kind cluster, deploy the first
+  # lab and the Helm chart, and assert the workloads actually become ready.
+  # Schema validation proves manifests are well-formed; only this proves they
+  # work.
+  e2e:
+    name: e2e (kind)
+    runs-on: ubuntu-latest
+    needs: [kubeconform, helm, app]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          version: v0.24.0
+          cluster_name: k8s-labs
+          # Single-node config: the 3-node lab cluster cannot reliably join its
+          # workers on a hosted runner. See kind/cluster-ci.yaml for detail.
+          config: kind/cluster-ci.yaml
+          wait: 180s
+
+      - name: Build and load the demo image
+        run: |
+          docker build -t ghcr.io/maneeshm/k8s-labs-demo:1.0.0 app/
+          kind load docker-image ghcr.io/maneeshm/k8s-labs-demo:1.0.0 --name k8s-labs
+
+      - name: Deploy lab 01
+        run: |
+          kubectl apply -f labs/01-pods-and-deployments --recursive
+          kubectl wait --for=condition=Available deployment --all \
+            -n lab-01-workloads --timeout=180s
+
+      - name: Show lab 01 state
+        if: always()
+        run: |
+          kubectl get all -n lab-01-workloads
+          kubectl get events -n lab-01-workloads --sort-by=.lastTimestamp | tail -30
+
+      - name: Install the Helm chart
+        run: |
+          helm upgrade --install demo-app "${CHART_DIR}" \
+            --namespace lab-08-helm \
+            --create-namespace \
+            --wait --timeout 5m
+
+      - name: Run the chart's helm test
+        run: helm test demo-app --namespace lab-08-helm
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A
+          kubectl describe pods -n lab-01-workloads
+          kubectl describe pods -n lab-08-helm

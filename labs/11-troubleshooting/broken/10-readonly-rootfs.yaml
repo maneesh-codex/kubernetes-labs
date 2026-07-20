@@ -1,0 +1,92 @@
+---
+# BROKEN SCENARIO 10 - readOnlyRootFilesystem vs an app that writes to disk
+#
+# This is the scenario that ties the whole repository together. Every other lab
+# sets `readOnlyRootFilesystem: true` because it is one of the highest-value
+# container hardening flags there is: it stops an attacker dropping a binary,
+# rewriting a config, or persisting anything at all. But it is also the flag
+# most likely to break a working application, because a great many programs
+# write somewhere - logs, PID files, caches, temp files for TLS, /tmp for
+# uploads - without ever documenting it.
+#
+# The right response is never "turn the flag off". It is "find out what the
+# process writes, and mount an emptyDir there". See fixed/10-*.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-10-readonly-fs
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-10-readonly-fs
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broken-10-readonly-fs
+      app.kubernetes.io/instance: lab-11
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broken-10-readonly-fs
+        app.kubernetes.io/instance: lab-11
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "starting; writing pidfile and opening log"
+              # Each of these three writes hits the read-only root filesystem.
+              echo $$ > /var/run/app.pid
+              mkdir -p /var/log/app
+              echo "$(date -Iseconds) started" >> /var/log/app/app.log
+              exec sleep infinity
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            # This flag is CORRECT. The bug is the absence of writable volumes
+            # below, not the presence of this line. Resist the urge to "fix" it
+            # by setting false - that is how a hardening standard quietly
+            # erodes, one exception at a time.
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # BUG: no volumeMounts at all. /var/run, /var/log and /tmp are all on
+          # the read-only root layer, so every write above fails with EROFS.

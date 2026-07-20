@@ -1,0 +1,66 @@
+---
+# backend -> database, egress half.
+#
+# Observe what is NOT here: no rule lets the FRONTEND reach the database. That
+# is the whole point of a tiered policy - a compromised frontend can talk to
+# the backend and to DNS, and nothing else. Verify it in the walkthrough by
+# curling database:5432 from a frontend Pod and watching it hang.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-egress-to-database
+  namespace: lab-07-netpol
+  labels:
+    app.kubernetes.io/name: backend-egress-to-database
+    app.kubernetes.io/instance: lab-07
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: security
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  podSelector:
+    matchLabels:
+      netpol.kubernetes-labs.io/tier: backend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              netpol.kubernetes-labs.io/tier: database
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# backend -> database, ingress half.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: database-ingress-from-backend
+  namespace: lab-07-netpol
+  labels:
+    app.kubernetes.io/name: database-ingress-from-backend
+    app.kubernetes.io/instance: lab-07
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: security
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  podSelector:
+    matchLabels:
+      netpol.kubernetes-labs.io/tier: database
+  policyTypes:
+    # Ingress only. The database is never given an egress allowance beyond DNS
+    # (granted by 50-allow-dns.yaml, which selects all Pods). A data tier that
+    # cannot initiate outbound connections cannot exfiltrate to the internet
+    # even if the process is fully compromised - this is one of the highest
+    # value controls in the whole file, and it costs one omitted stanza.
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              netpol.kubernetes-labs.io/tier: backend
+      ports:
+        - protocol: TCP
+          port: 5432

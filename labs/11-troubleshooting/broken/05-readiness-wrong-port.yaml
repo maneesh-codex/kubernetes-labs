@@ -1,0 +1,133 @@
+---
+# BROKEN SCENARIO 05 - readiness probe on the wrong port/path
+#                      -> Pod never Ready -> Service has NO endpoints
+#                      -> callers get "connection refused"
+#
+# The most valuable scenario in this lab, because the symptom appears three
+# layers away from the cause. A client reports a connection error, you check the
+# Service (fine), you check the Pods (Running!), and only `kubectl get endpoints`
+# reveals the truth. The container is perfectly healthy; the probe is wrong.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-05-readiness
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-05-readiness
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broken-05-readiness
+      app.kubernetes.io/instance: lab-11
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broken-05-readiness
+        app.kubernetes.io/instance: lab-11
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: demo-app
+          image: ghcr.io/maneeshm/k8s-labs-demo:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              # BUG 1: the app serves /readyz. /health/ready is a Spring Boot
+              # Actuator convention that this app has never heard of - it
+              # returns 404, and any non-2xx/3xx is a probe failure.
+              path: /health/ready
+              # BUG 2: nothing listens on 9090. Using a hard-coded number rather
+              # than the named port `http` is what allowed the two to drift.
+              port: 9090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+---
+# The Service is entirely correct. Its selector matches, its ports are right -
+# and it still has zero endpoints, because EndpointSlices only ever contain
+# READY Pods. A correct Service in front of unready Pods is indistinguishable,
+# from the client side, from a Service with a broken selector.
+apiVersion: v1
+kind: Service
+metadata:
+  name: broken-05-readiness
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-05-readiness
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: broken-05-readiness
+    app.kubernetes.io/instance: lab-11
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

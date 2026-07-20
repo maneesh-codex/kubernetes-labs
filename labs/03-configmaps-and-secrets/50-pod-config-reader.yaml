@@ -1,0 +1,115 @@
+---
+# An inspection pod.
+#
+# The demo image is built FROM scratch: no shell, no coreutils, nothing to exec
+# into. That is exactly what you want in production and exactly what makes a
+# lab about mounted files hard to demonstrate. This pod mounts the same
+# ConfigMap and Secret with the same modes, and it does have a shell, so you
+# can `kubectl exec` into it to see precisely what the kubelet projects.
+#
+# It also proves the live-update behaviour: because BOTH pods mount the same
+# ConfigMap, editing that ConfigMap updates the files here and in the demo pods
+# at the same time - via the same kubelet sync loop.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: config-reader
+  namespace: lab-03-config
+  labels:
+    app.kubernetes.io/name: config-reader
+    app.kubernetes.io/instance: lab-03
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 5
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  volumes:
+    - name: config
+      configMap:
+        name: demo-config
+        defaultMode: 0444
+        items:
+          - key: app.properties
+            path: app.properties
+          - key: proxy.conf
+            path: proxy.conf
+    - name: secret
+      secret:
+        secretName: demo-secret
+        # 0440, not 0400 - see the long comment in 30-deployment.yaml. Secret
+        # files are owned root:<fsGroup>, so 0400 is readable only by root and
+        # this container runs as 65532. The readinessProbe below (test -r)
+        # would fail permanently with 0400, which makes this pod a live
+        # demonstration of the trap.
+        defaultMode: 0440
+        items:
+          - key: credentials.ini
+            path: credentials.ini
+    - name: tmp
+      emptyDir:
+        medium: Memory
+        sizeLimit: 8Mi
+  containers:
+    - name: shell
+      image: busybox:1.36
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+        - -c
+        - "sleep infinity"
+      volumeMounts:
+        - name: config
+          mountPath: /etc/demo
+          readOnly: true
+        - name: secret
+          mountPath: /etc/demo-secret
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      # busybox serves no HTTP, so the standard httpGet probes do not apply.
+      # An exec probe on the mounted config is genuinely useful here: it fails
+      # the pod if the projection ever disappears, which is the one failure
+      # mode this pod exists to observe.
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "test -f /etc/demo/app.properties"
+        initialDelaySeconds: 5
+        periodSeconds: 10
+        timeoutSeconds: 2
+        failureThreshold: 3
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "test -r /etc/demo-secret/credentials.ini"
+        initialDelaySeconds: 3
+        periodSeconds: 5
+        timeoutSeconds: 2
+        failureThreshold: 3
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL

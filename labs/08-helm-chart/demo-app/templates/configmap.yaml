@@ -1,0 +1,16 @@
+{{- if .Values.config -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "demo-app.fullname" . }}-config
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.config }}
+  # Values are quoted so that YAML-ish inputs (`true`, `false`, `0755`, `1.10`)
+  # survive as the strings the container expects rather than being coerced by
+  # the YAML parser. ConfigMap data values must be strings regardless.
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+{{- end }}

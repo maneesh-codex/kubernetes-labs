@@ -1,0 +1,101 @@
+---
+# THE ROOT APPLICATION -- the "app of apps".
+#
+# This is the one and only object you apply by hand. Everything else in this
+# lab is created by Argo CD from git. It is an Application whose source is a
+# DIRECTORY OF APPLICATIONS (`apps/`), so syncing it creates the child
+# Applications, and each of those then syncs its own workloads.
+#
+# Why bother? Because it makes cluster bootstrap a single command and, more
+# importantly, makes "what is supposed to be running in this cluster" a
+# reviewable file in git rather than tribal knowledge. Adding a new application
+# to the platform becomes a pull request that adds one YAML file to apps/.
+#
+# The recursion is intentional and safe: Argo CD manages Application objects
+# exactly as it manages any other Kubernetes resource.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  # Applications must live in the namespace the Argo CD instance watches,
+  # which is `argocd` unless you enabled the applications-in-any-namespace
+  # feature. Putting them anywhere else is a silent no-op.
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: root
+    app.kubernetes.io/instance: lab-10
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: app-of-apps
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: argocd
+  finalizers:
+    # Cascading delete: removing this Application removes every child
+    # Application and, through them, every workload they manage.
+    #
+    # Without this finalizer, `kubectl delete application root` deletes only
+    # the Application object and ORPHANS everything it created -- resources
+    # left running with nothing managing them. That is the single most
+    # surprising Argo CD behaviour for newcomers.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # The root app itself uses the built-in `default` project rather than the
+  # restricted one it is about to create. This avoids a chicken-and-egg
+  # problem: the AppProject does not exist until the root app syncs it.
+  project: default
+
+  source:
+    # >>> REPLACE THIS WITH YOUR OWN FORK <<<
+    # Argo CD pulls from git, so it must be a URL Argo can reach and that
+    # contains YOUR edits. Pointing at the upstream repo means your changes are
+    # never deployed and, worse, that self-heal will happily revert them.
+    #   git clone https://github.com/maneeshm/kubernetes-labs.git
+    #   gh repo fork maneeshm/kubernetes-labs --clone
+    # then update repoURL here AND in every file under apps/.
+    repoURL: https://github.com/maneeshm/kubernetes-labs.git
+    # Track a branch for a lab; track a TAG or commit SHA in production. A
+    # branch means the cluster's state changes whenever someone merges, which
+    # is fine for dev and unacceptable for prod without a release gate.
+    targetRevision: main
+    path: labs/10-gitops-argocd/apps
+    directory:
+      # Do not recurse: apps/ contains only Application and AppProject
+      # manifests. Recursing would sweep in unrelated YAML from subdirectories.
+      recurse: false
+
+  destination:
+    # `https://kubernetes.default.svc` is the in-cluster API server -- the
+    # cluster Argo CD itself runs on. For a multi-cluster setup this would be a
+    # registered remote cluster URL or, better, `name:` with a friendly alias.
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      # Delete resources removed from git. Off by default because it is the
+      # setting that can destroy things -- deleting a file now deletes the
+      # workload. That is exactly the GitOps contract, but it must be a
+      # deliberate choice.
+      prune: true
+      # Revert manual changes. This is what makes the cluster CONVERGE on git
+      # rather than merely being seeded from it. Demonstrated in the
+      # walkthrough by scaling a Deployment by hand and watching it snap back.
+      selfHeal: true
+      # Also prune when the parent app is deleted rather than orphaning.
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      # Only send resources that actually differ to the API server. On a large
+      # app this turns a sync from hundreds of no-op PATCH calls into a handful,
+      # which matters when the API server is the bottleneck.
+      - ApplyOutOfSyncOnly=true
+      # Argo's own tracking annotation rather than the older label, so it
+      # cannot collide with application labels.
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        # 5s, 10s, 20s, 40s, 80s -- capped here. Exponential backoff without a
+        # cap eventually means retrying once a day, which looks like a hang.
+        maxDuration: 3m

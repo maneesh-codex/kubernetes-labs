@@ -1,0 +1,35 @@
+---
+# A standalone PVC: a REQUEST for storage, decoupled from any pod.
+#
+# The lifecycle is worth stating precisely, because it is where the surprises
+# live. The PVC is namespaced and belongs to the app team; the PersistentVolume
+# it binds to is cluster-scoped and belongs to the platform. Deleting the pod
+# that mounts this PVC does nothing to the PVC. Deleting the DEPLOYMENT does
+# nothing to it either. Only deleting the PVC itself releases the PV - and what
+# happens then is governed by the StorageClass's reclaimPolicy.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: demo-shared-data
+  namespace: lab-04-storage
+  labels:
+    app.kubernetes.io/name: demo-shared-data
+    app.kubernetes.io/instance: lab-04
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  accessModes:
+    # ReadWriteOnce means one NODE may mount it read-write - not one pod. Two
+    # pods on the SAME node can both mount an RWO volume, which surprises
+    # people who assumed it was an exclusive lock. If you genuinely need
+    # single-pod semantics, use ReadWriteOncePod (GA since v1.29).
+    #
+    # EBS is RWO and cannot be shared across nodes; if you need many nodes
+    # writing the same volume you need ReadWriteMany, which on AWS means EFS.
+    - ReadWriteOnce
+  storageClassName: lab-local-path
+  resources:
+    requests:
+      storage: 1Gi

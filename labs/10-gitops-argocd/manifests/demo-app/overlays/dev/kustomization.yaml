@@ -1,0 +1,59 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Dev overlay: cheap, chatty, and disposable.
+
+resources:
+  - ../../base
+
+# Deliberately NO namePrefix. The two environments are separated by NAMESPACE
+# (each Application sets its own destination.namespace), not by name mangling.
+#
+# That keeps `demo-app` addressable as `demo-app` in both environments, so the
+# PostSync smoke-test hook can curl a fixed hostname and any manifest that
+# references the Service by name stays portable. A namePrefix would rename the
+# objects but NOT rewrite hostnames embedded in container args, which is a
+# quietly broken state that only shows up at runtime.
+#
+# Use namePrefix when several variants share one namespace; use namespaces
+# when they do not.
+
+commonAnnotations:
+  kubernetes-labs/environment: dev
+
+labels:
+  - pairs:
+      app.kubernetes.io/instance: lab-10-dev
+    includeSelectors: false
+
+# One replica is fine here: dev has no availability target, and halving the
+# pod count halves the cost of a cluster that exists to be broken.
+replicas:
+  - name: demo-app
+    count: 1
+
+configMapGenerator:
+  - name: demo-app-config
+    behavior: merge
+    literals:
+      - LOG_LEVEL=debug
+      - APP_TIER=dev
+      - FEATURE_FLAG_BETA=true
+
+# The generator appends a content hash to the ConfigMap name and rewrites every
+# reference to it, so a config change produces a NEW ConfigMap name and
+# therefore a new pod template -- which rolls the pods automatically. This is
+# Kustomize's answer to the same problem Helm solves with a checksum annotation
+# (lab 08). Set `disableNameSuffixHash: true` and you silently lose that.
+generatorOptions:
+  disableNameSuffixHash: false
+
+patches:
+  - target:
+      kind: Deployment
+      name: demo-app
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/1/value
+        value: "Hello from the DEV overlay"

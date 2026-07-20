@@ -1,0 +1,53 @@
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: demo-metrics
+  namespace: lab-09-observability
+  labels:
+    app.kubernetes.io/name: demo-metrics
+    app.kubernetes.io/instance: lab-09
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: metrics
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+    # DISCOVERY LABEL. kube-prometheus-stack configures its Prometheus with
+    # `serviceMonitorSelector: {matchLabels: {release: <helm-release-name>}}`.
+    # A ServiceMonitor without this label is a perfectly valid object that
+    # Prometheus simply never reads.
+    #
+    # Two ways out: carry this label (what we do here), or set
+    # `serviceMonitorSelectorNilUsesHelmValues: false` in the stack's values so
+    # the selector is nil and matches everything. The lab does BOTH so that the
+    # walkthrough works either way -- see values-kube-prometheus-stack.yaml.
+    release: kube-prometheus-stack
+spec:
+  # Which SERVICES to scrape. These labels must match the Service's
+  # `metadata.labels` -- not the pod labels, and not the Service's
+  # `spec.selector`. Mixing those up is the second most common failure here.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-metrics
+      app.kubernetes.io/instance: lab-09
+  namespaceSelector:
+    matchNames:
+      - lab-09-observability
+  endpoints:
+    # `port` is the Service port NAME from 20-service.yaml, never the number.
+    - port: http
+      path: /metrics
+      # 15s balances graph resolution against cost. Active series are billed per
+      # sample on Amazon Managed Prometheus, so halving this doubles ingest.
+      interval: 15s
+      # Must be strictly less than `interval`, or a slow scrape overlaps the
+      # next one and Prometheus starts dropping samples.
+      scrapeTimeout: 10s
+      scheme: http
+      # Relabelling runs on the labels Prometheus attaches, before ingestion.
+      # Dropping the Go runtime's own metrics is the cheapest cardinality win
+      # available; on a real fleet `go_*` and `promhttp_*` are frequently a
+      # third of the series and nobody ever queries them.
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: "go_.*|promhttp_.*"
+          action: drop

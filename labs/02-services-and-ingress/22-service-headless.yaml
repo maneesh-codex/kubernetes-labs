@@ -1,0 +1,40 @@
+---
+# A HEADLESS Service: clusterIP: None. No virtual IP is allocated and kube-proxy
+# programs nothing. Instead, a DNS query for api-headless.lab-02-networking.svc
+# returns the A records of every READY pod behind it, and the client picks one.
+#
+# That shifts load balancing from the kernel to the caller, which is what you
+# want for gRPC (which multiplexes over one long-lived HTTP/2 connection and so
+# would otherwise pin itself to a single pod through a ClusterIP), for client-
+# side service discovery, and for StatefulSets that need per-pod identity.
+#
+# Note the limit of pairing headless with a Deployment: you get the set of pod
+# IPs, but not stable per-pod DNS names. Stable names like web-0.svc require a
+# StatefulSet, which lab 04 covers.
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-headless
+  namespace: lab-02-networking
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/instance: lab-02
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  type: ClusterIP
+  clusterIP: None
+  # With false (the default), only ready pods appear in DNS. Set it to true and
+  # unready pods are published too - occasionally needed for peer discovery in
+  # clustered databases that must find each other before they can report ready.
+  publishNotReadyAddresses: false
+  selector:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/instance: lab-02
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

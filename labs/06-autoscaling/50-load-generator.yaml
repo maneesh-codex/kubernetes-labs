@@ -1,0 +1,124 @@
+---
+# Load generator.
+#
+# Image choice: busybox:1.36. The demo app image is `scratch`-based with no
+# shell and no HTTP client, so it cannot drive load against itself. busybox
+# ships `wget`, and although its Dockerfile declares USER root, nothing in
+# `wget` needs privileges - so it runs happily under UID 65532 with a read-only
+# root filesystem, satisfying the restricted Pod Security Standard on the
+# namespace. (`curlimages/curl` is an equally good choice and already runs as
+# UID 100.)
+#
+# Deployment rather than Job: we want to start and stop load on demand by
+# scaling replicas, and we want each replica to be an independent concurrent
+# client. Scale to 0 to stop, scale to 3-5 to overwhelm the target.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-generator
+  namespace: lab-06-autoscaling
+  labels:
+    app.kubernetes.io/name: load-generator
+    app.kubernetes.io/instance: lab-06
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: loadtest
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  # Start at zero. Nothing should generate load until you deliberately ask for
+  # it - a load generator left running is how a lab becomes a cloud bill.
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: load-generator
+      app.kubernetes.io/instance: lab-06
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: load-generator
+        app.kubernetes.io/instance: lab-06
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: loadtest
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: load
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          # Hit /burn?seconds=30 in a tight loop. Each call pins one core inside
+          # the target Pod for 30 seconds (capped at 60s server-side), so a
+          # handful of these replicas will drive the target far past its 60%
+          # CPU utilisation trigger. -T 90 exceeds the app's 90s WriteTimeout so
+          # wget does not give up mid-burn.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "load generator starting against $TARGET"
+              while true; do
+                wget -q -O /dev/null -T 90 "$TARGET/burn?seconds=30" \
+                  || echo "request failed, retrying"
+              done
+          env:
+            - name: TARGET
+              # Service DNS. Short name works because we are in the same
+              # namespace; the FQDN is demo-app.lab-06-autoscaling.svc.cluster.local
+              value: "http://demo-app"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          # Deliberately small: the generator must not compete with the workload
+          # under test for CPU on a two-node kind cluster. It spends nearly all
+          # its time blocked on I/O waiting for /burn to return.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          # No HTTP server here, so exec probes. They confirm the container is
+          # alive without pretending it serves traffic.
+          livenessProbe:
+            exec:
+              command: ["/bin/true"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["/bin/true"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

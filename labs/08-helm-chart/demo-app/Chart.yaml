@@ -1,0 +1,39 @@
+---
+apiVersion: v2
+name: demo-app
+description: >-
+  A production-shaped Helm chart for the kubernetes-labs demo application.
+  Ships a hardened Deployment, Service, ServiceAccount, optional Ingress,
+  HPA, PodDisruptionBudget, ConfigMap, Secret and Prometheus ServiceMonitor,
+  plus a chart test that exercises the container's health endpoint.
+type: application
+
+# `version` is the chart version and moves whenever the templates or defaults
+# change. `appVersion` tracks the demo application image and is what ends up in
+# the app.kubernetes.io/version label. Bumping the image alone should bump
+# appVersion and the patch digit of version -- they are deliberately separate.
+version: 0.1.0
+appVersion: "1.0.0"
+
+kubeVersion: ">=1.25.0-0"
+
+keywords:
+  - demo
+  - golang
+  - kubernetes-labs
+  - observability
+  - security-hardened
+
+home: https://github.com/maneeshm/kubernetes-labs
+sources:
+  - https://github.com/maneeshm/kubernetes-labs
+  - https://github.com/maneeshm/kubernetes-labs/tree/main/app
+
+maintainers:
+  - name: Maneesh M
+    email: maneeshm4u@gmail.com
+    url: https://github.com/maneeshm
+
+annotations:
+  category: Demo
+  licenses: MIT

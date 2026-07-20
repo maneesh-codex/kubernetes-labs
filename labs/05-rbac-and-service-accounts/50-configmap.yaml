@@ -1,0 +1,17 @@
+---
+# Referenced by resourceNames in the Role, and mounted by the Deployment. Its
+# only job in this lab is to be a concrete object that RBAC rules can point at.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-app-config
+  namespace: lab-05-rbac
+  labels:
+    app.kubernetes.io/name: demo-app
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+data:
+  GREETING: "Hello from lab 05 - I am running as the demo-app ServiceAccount."

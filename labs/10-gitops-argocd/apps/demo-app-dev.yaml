@@ -1,0 +1,90 @@
+---
+# Child Application: the demo app's DEV overlay.
+# Created by the root app, not by hand.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-app-dev
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: demo-app-dev
+    app.kubernetes.io/instance: lab-10
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: application
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: argocd
+  annotations:
+    # Dev syncs before prod. With `argocd app sync --apply-out-of-sync-only`
+    # driving a promotion, this ordering is what makes "dev first" structural
+    # rather than a convention someone has to remember.
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: kubernetes-labs
+
+  source:
+    # >>> REPLACE WITH YOUR FORK <<<
+    repoURL: https://github.com/maneeshm/kubernetes-labs.git
+    targetRevision: main
+    # Argo CD detects Kustomize automatically from the presence of
+    # kustomization.yaml -- no plugin, no config, no `kustomize build` step.
+    path: labs/10-gitops-argocd/manifests/demo-app/overlays/dev
+    kustomize:
+      # Argo can override the image without touching git. Useful for a quick
+      # experiment; note that doing so makes the live state diverge from the
+      # repo, which is precisely what GitOps is meant to prevent -- so treat
+      # this as a debugging tool, not a deployment mechanism.
+      images:
+        - ghcr.io/maneeshm/k8s-labs-demo:1.0.0
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: lab-10-gitops
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+      # Server-side apply handles large CRDs that blow the 262144-byte
+      # last-applied-configuration annotation limit, and merges more
+      # predictably when several controllers own different fields.
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # IGNORE DIFFERENCES.
+  #
+  # Some fields are legitimately owned by a controller rather than by git.
+  # Without these rules Argo sees a permanent diff, reports OutOfSync forever,
+  # and -- with selfHeal on -- fights the controller in a loop that generates
+  # API churn and never converges.
+  ignoreDifferences:
+    # The classic. If an HPA manages replicas, git must not.
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+
+    # Kubernetes injects a default ServiceAccount token secret on older
+    # clusters; it is not in git and never will be.
+    - group: ""
+      kind: ServiceAccount
+      jsonPointers:
+        - /secrets
+
+    # A managed-fields based rule: ignore any field another controller owns,
+    # rather than enumerating them. This is the more maintainable form once
+    # you have several mutating webhooks in play.
+    - group: apps
+      kind: Deployment
+      managedFieldsManagers:
+        - kube-controller-manager

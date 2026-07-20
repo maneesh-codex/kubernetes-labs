@@ -1,0 +1,243 @@
+---
+# Values for the kube-prometheus-stack chart, tuned to fit on a kind cluster.
+#
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm repo update
+#   helm upgrade --install kube-prometheus-stack \
+#     prometheus-community/kube-prometheus-stack \
+#     --namespace monitoring --create-namespace \
+#     -f values-kube-prometheus-stack.yaml \
+#     --wait --timeout 10m
+#
+# The release name matters. kube-prometheus-stack stamps `release: <name>` onto
+# the objects it owns and, by default, tells Prometheus to select only
+# ServiceMonitors carrying that label. Installing under a different name means
+# the `release: kube-prometheus-stack` labels in this lab's manifests no longer
+# match. Keep the name, or update the labels in 30-servicemonitor.yaml and
+# 40-prometheusrule.yaml to match.
+
+prometheus:
+  prometheusSpec:
+    # ================================================================
+    # THE NUMBER ONE GOTCHA. Read this before opening a bug report.
+    # ================================================================
+    #
+    # The chart's default is `true`, which means: "when the user has not
+    # explicitly set serviceMonitorSelector, derive it from the Helm release" --
+    # producing `serviceMonitorSelector: {matchLabels: {release: kube-prometheus-stack}}`.
+    #
+    # The consequence is that a ServiceMonitor you write by hand is a completely
+    # valid object that Prometheus silently ignores. `kubectl get servicemonitor`
+    # shows it. The Prometheus Operator logs nothing. Status > Targets simply
+    # does not list it. There is no error to search for, which is precisely why
+    # this costs people an afternoon.
+    #
+    # Setting it to `false` makes the selector nil, and a nil selector in the
+    # Prometheus Operator means "match every ServiceMonitor in every namespace
+    # I am allowed to watch".
+    #
+    # Which should you choose in production? The label. A nil selector means any
+    # team can add scrape load to a shared Prometheus without review, and a
+    # single high-cardinality exporter can then take the whole instance down.
+    # This lab sets `false` so the walkthrough works even if you forget the
+    # label -- the manifests carry the label anyway, so you can flip this to
+    # `true` and everything still works. Try it both ways.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    # The same trap applies independently to PodMonitors, PrometheusRules and
+    # scrape configs. Fixing only the ServiceMonitor one and then wondering why
+    # your alerts never load is a common follow-up.
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+
+    # Retention. kind has no persistent volume worth speaking of, so keep the
+    # window short and let the data live in the pod's emptyDir. Restarting
+    # Prometheus loses history -- acceptable for a lab, never for production.
+    retention: 6h
+    retentionSize: 2GB
+
+    # No PVC on kind. The default StorageClass (`standard`, rancher local-path)
+    # does work, so if you want history to survive a pod restart, uncomment the
+    # storageSpec block below instead.
+    #
+    # storageSpec:
+    #   volumeClaimTemplate:
+    #     spec:
+    #       storageClassName: standard
+    #       accessModes: ["ReadWriteOnce"]
+    #       resources:
+    #         requests:
+    #           storage: 5Gi
+
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        # Prometheus is memory-hungry and memory-sensitive: exceeding this gets
+        # the pod OOMKilled mid-scrape and it replays the WAL on restart, which
+        # is slow. If it keeps dying, raise this before anything else.
+        memory: 1536Mi
+
+    # One replica. Real HA means two identical replicas scraping the same
+    # targets, with Thanos or Mimir deduplicating -- out of scope on kind.
+    replicas: 1
+
+    # Scrape every 30s globally; the lab's ServiceMonitor overrides this to 15s
+    # for its own target. Global interval is the biggest single lever on cost.
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+
+    # Attach cluster identity to every sample. Essential the moment more than
+    # one cluster writes into the same Amazon Managed Prometheus workspace --
+    # without it, series from staging and production collide indistinguishably.
+    externalLabels:
+      cluster: kind-kubernetes-labs
+      environment: lab
+
+    # ---------------------------------------------------------------
+    # Amazon Managed Prometheus (AMP) remote_write. Commented out for the
+    # lab; this is the shape you need on EKS. The Prometheus ServiceAccount
+    # must be IRSA-annotated with a role granting aps:RemoteWrite.
+    # ---------------------------------------------------------------
+    # remoteWrite:
+    #   - url: https://aps-workspaces.eu-west-1.amazonaws.com/workspaces/ws-xxxx/api/v1/remote_write
+    #     sigv4:
+    #       region: eu-west-1
+    #     queueConfig:
+    #       capacity: 5000
+    #       maxSamplesPerSend: 1000
+    #       maxShards: 200
+    #     writeRelabelConfigs:
+    #       # Ship only what you will actually query. Remote write is billed per
+    #       # sample ingested, so this list is a direct cost control.
+    #       - sourceLabels: [__name__]
+    #         regex: "demo_app_.*|up|kube_pod_status_phase|node_cpu_seconds_total"
+    #         action: keep
+
+alertmanager:
+  alertmanagerSpec:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+    # No storage on kind; silences and notification state are lost on restart.
+    storage: {}
+
+grafana:
+  enabled: true
+  # LAB ONLY. In production omit this entirely and let the chart generate a
+  # random password into a Secret, or better, disable local auth and use SSO:
+  #
+  #   kubectl get secret kube-prometheus-stack-grafana -n monitoring \
+  #     -o jsonpath='{.data.admin-password}' | base64 -d
+  #
+  # On EKS the right answer is usually Amazon Managed Grafana with IAM Identity
+  # Center, so there is no local admin account to leak in the first place.
+  adminPassword: prom-operator
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+  persistence:
+    # Dashboards defined as ConfigMaps are re-imported on every start, so
+    # losing the pod's disk costs nothing. Dashboards created by clicking
+    # around in the UI, however, are gone forever -- which is a good reason to
+    # keep dashboards in git as this lab does.
+    enabled: false
+
+  sidecar:
+    dashboards:
+      enabled: true
+      # The sidecar watches every namespace for ConfigMaps carrying the label
+      # below and drops their contents into Grafana's provisioning directory.
+      # This is how 50-grafana-dashboard.yaml gets picked up without anyone
+      # touching the Grafana UI.
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+    datasources:
+      enabled: true
+      label: grafana_datasource
+      searchNamespace: ALL
+
+  grafana.ini:
+    users:
+      viewers_can_edit: true
+    auth.anonymous:
+      # Convenience for a local lab so port-forward works without logging in.
+      # NEVER do this on anything reachable from a network you do not control.
+      enabled: true
+      org_role: Viewer
+
+# ------------------------------------------------------------------
+# Components that do not work, or are not useful, on kind.
+# ------------------------------------------------------------------
+
+# kind runs the control plane as static pods with their metrics endpoints bound
+# to 127.0.0.1, so these scrape jobs can never connect. Leaving them enabled
+# produces permanently red targets and a firing KubeControllerManagerDown that
+# trains everyone to ignore alerts. On EKS the control plane is AWS-managed and
+# these are equally unavailable -- disable them there too.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+nodeExporter:
+  enabled: true
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+# The chart's default rules include alerts for the components disabled above.
+# Turning those rule groups off keeps Alertmanager quiet and, more importantly,
+# keeps the alert list meaningful.
+defaultRules:
+  create: true
+  rules:
+    etcd: false
+    kubeControllerManager: false
+    kubeScheduler: false
+    kubeProxy: false
+    kubernetesSystem: true
+    kubernetesApps: true
+    node: true
+    alertmanager: true
+    prometheus: true

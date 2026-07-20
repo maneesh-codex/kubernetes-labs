@@ -1,0 +1,69 @@
+---
+# A Role is namespaced: every rule below is implicitly scoped to lab-05-rbac.
+# There is no way to widen a Role's scope, which is exactly why you should
+# reach for Role before ClusterRole every single time.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-configmap-reader
+  namespace: lab-05-rbac
+  labels:
+    app.kubernetes.io/name: pod-configmap-reader
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+rules:
+  # The core API group is the empty string, not "core" or "v1".
+  - apiGroups: [""]
+    resources: ["pods", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  # Subresources are addressed with a slash. Note that `pods/log` is a separate
+  # grant from `pods`: being able to list Pods does not let you read their logs,
+  # and log access is frequently a data-exfiltration path worth withholding.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Deployments live in the apps group. Read-only here - no create/update/delete.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  # resourceNames pins a rule to specific objects. This is how you let a
+  # workload rotate exactly one ConfigMap without handing it the whole
+  # namespace. Caveat worth memorising: resourceNames cannot be used with
+  # `list`, `watch`, `create` or `deletecollection`, because the request has no
+  # object name to authorise against.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["demo-app-config"]
+    verbs: ["update", "patch"]
+---
+# The binding is what actually grants anything. A Role with no RoleBinding is
+# inert - a very common source of "I created the Role, why is it still
+# forbidden?" confusion.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: demo-app-pod-configmap-reader
+  namespace: lab-05-rbac
+  labels:
+    app.kubernetes.io/name: demo-app-pod-configmap-reader
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+subjects:
+  - kind: ServiceAccount
+    name: demo-app
+    namespace: lab-05-rbac
+  - kind: ServiceAccount
+    name: kubectl-debug
+    namespace: lab-05-rbac
+roleRef:
+  # roleRef is immutable after creation. To change which role a binding points
+  # at you must delete and recreate the binding - plan for that in GitOps.
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pod-configmap-reader

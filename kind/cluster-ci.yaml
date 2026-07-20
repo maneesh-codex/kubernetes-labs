@@ -1,0 +1,52 @@
+---
+# Single-node kind cluster used only by the CI e2e job.
+#
+# Why this exists separately from kind/cluster.yaml:
+#
+# The lab cluster is control-plane + 2 workers, because two workers is what
+# makes topologySpreadConstraints, anti-affinity and draining observable. That
+# shape is right for learning and wrong for CI - a standard GitHub-hosted
+# runner (2 vCPU / ~16GB, but heavily contended I/O) reliably fails to join
+# the workers within kubeadm's timeout:
+#
+#   ✗ Joining worker nodes 🚜
+#   failed to join node with kubeadm ... 'curl -sSL http://127.0.0.1:10248/healthz'
+#   returned error: dial tcp 127.0.0.1:10248: i/o timeout
+#
+# The e2e job only smoke-tests that lab 01 deploys and the Helm chart's test
+# hook passes; neither needs a second node. So CI gets one node and the labs
+# keep their realistic topology.
+#
+# Usage (CI only):
+#   kind create cluster --name k8s-labs --config kind/cluster-ci.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: k8s-labs
+
+networking:
+  # Kept identical to kind/cluster.yaml so any manifest referencing these
+  # ranges (notably lab 07's ipBlock rules) behaves the same in CI.
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/16"
+  disableDefaultCNI: false
+  kubeProxyMode: "iptables"
+
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    # The single node carries the synthetic zone label as well, so workloads
+    # with a zone nodeSelector still schedule instead of hanging Pending.
+    labels:
+      topology.kubernetes.io/zone: zone-a
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP

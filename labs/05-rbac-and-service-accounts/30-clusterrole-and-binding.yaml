@@ -1,0 +1,87 @@
+---
+# Nodes are cluster-scoped objects: they do not live in a namespace, so they can
+# only be granted via a ClusterRole. This is the legitimate reason to reach for
+# one - not "it was easier than writing a Role per namespace".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lab-05-node-reader
+  labels:
+    app.kubernetes.io/name: lab-05-node-reader
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # metrics.k8s.io is served by metrics-server (see lab 06). Reading node
+  # metrics is what `kubectl top nodes` does under the hood.
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # Non-resource URLs are only expressible in a ClusterRole. `/healthz` and
+  # `/version` are the usual safe grants; never grant nonResourceURLs: ["*"].
+  - nonResourceURLs: ["/healthz", "/version", "/readyz"]
+    verbs: ["get"]
+---
+# A ClusterRoleBinding grants the ClusterRole across EVERY namespace and at
+# cluster scope. If you only need the role in one namespace, bind the
+# ClusterRole with a *RoleBinding* instead (see 35-*.yaml) - that is the
+# under-used trick that keeps blast radius small.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lab-05-demo-app-node-reader
+  labels:
+    app.kubernetes.io/name: lab-05-demo-app-node-reader
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+subjects:
+  - kind: ServiceAccount
+    name: demo-app
+    namespace: lab-05-rbac
+  - kind: ServiceAccount
+    name: kubectl-debug
+    namespace: lab-05-rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lab-05-node-reader
+---
+# Same ClusterRole, bound with a namespaced RoleBinding. The effective grant is
+# "the rules in the ClusterRole, but only for objects in lab-05-rbac". Here it
+# grants the built-in `view` role - reusing a curated upstream role instead of
+# hand-rolling one is both less work and less likely to be wrong.
+#
+# Note the interaction with cluster-scoped resources: a RoleBinding can never
+# grant access to Nodes, no matter what the ClusterRole says, because there is
+# no namespace to scope them to.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: demo-app-namespace-view
+  namespace: lab-05-rbac
+  labels:
+    app.kubernetes.io/name: demo-app-namespace-view
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+subjects:
+  - kind: ServiceAccount
+    name: kubectl-debug
+    namespace: lab-05-rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  # `view` is a default ClusterRole shipped by Kubernetes. It excludes Secrets
+  # precisely because "read everything" and "read credentials" should not be
+  # the same permission.
+  name: view

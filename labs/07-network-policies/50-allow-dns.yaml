@@ -1,0 +1,83 @@
+---
+# =============================================================================
+# !! THE CLASSIC GOTCHA !!  READ THIS BEFORE YOU DEBUG ANYTHING ELSE.
+# =============================================================================
+# The instant you apply a default-deny EGRESS policy, every Pod in the
+# namespace loses DNS. CoreDNS lives in kube-system, so talking to it is
+# cross-namespace egress like any other - and you just denied all of it.
+#
+# What you will see, and why it is so confusing:
+#   * `wget http://backend:8080` hangs for ~5-15 seconds, then fails with
+#     "bad address 'backend'" or "Name or service not known" - a DNS error,
+#     NOT a connection error. Engineers see "bad address" and go hunting for a
+#     Service or a typo, when the Service is perfectly fine.
+#   * `wget http://10.96.x.y:8080` (the ClusterIP, no name lookup) MAY still
+#     fail too - but with "connection timed out", a completely different
+#     symptom. Two different error messages for one root cause.
+#   * Application-level retries make it worse: many DNS resolvers retry
+#     silently, so latency spikes long before anything actually errors.
+#
+# Rule of thumb: **every default-deny-egress namespace needs a DNS allow rule,
+# and it should be applied in the same commit as the deny.** Ship them
+# together, always.
+#
+# Two more subtleties baked into the rules below:
+#   * BOTH UDP 53 and TCP 53. DNS falls back to TCP for responses larger than
+#     512 bytes (and always for zone transfers). A UDP-only rule works right up
+#     until a response gets big, and then fails intermittently - the worst
+#     possible failure mode. Cluster DNS also uses TCP for some resolver
+#     configurations. Allow both. It costs nothing.
+#   * The namespaceSelector uses `kubernetes.io/metadata.name`, an immutable
+#     label the API server stamps on every namespace automatically. Do not
+#     hand-label kube-system for this.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: lab-07-netpol
+  labels:
+    app.kubernetes.io/name: allow-dns-egress
+    app.kubernetes.io/instance: lab-07
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: security
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  # Every Pod in the namespace needs DNS. No exceptions worth carving out.
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        # ------------------------------------------------------------------
+        # CRITICAL YAML SUBTLETY: `namespaceSelector` and `podSelector` inside
+        # a SINGLE list item are AND-ed ("Pods matching X *in* namespaces
+        # matching Y"). Written as two separate list items they are OR-ed
+        # ("anything in namespace Y, OR any Pod matching X anywhere").
+        #
+        # This:                          means "kube-dns pods in kube-system".
+        #   - namespaceSelector: {...}
+        #     podSelector: {...}
+        #
+        # This:                          means "ALL of kube-system, OR kube-dns
+        #   - namespaceSelector: {...}    pods in ANY namespace" - far broader
+        #   - podSelector: {...}          than intended.
+        #
+        # The difference is one leading dash. It is the most consequential
+        # whitespace in Kubernetes networking.
+        # ------------------------------------------------------------------
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              # The label CoreDNS carries in a kubeadm/kind cluster. On EKS the
+              # CoreDNS Pods are labelled `k8s-app: kube-dns` as well, so this
+              # selector is portable. Verify with:
+              #   kubectl -n kube-system get pods -l k8s-app=kube-dns
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

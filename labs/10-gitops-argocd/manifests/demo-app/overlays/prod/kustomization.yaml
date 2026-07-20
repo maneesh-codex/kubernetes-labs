@@ -1,0 +1,73 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Prod overlay: the same base, with availability and safety turned up.
+
+resources:
+  - ../../base
+  - pdb.yaml
+
+# No namePrefix here either -- see the dev overlay for the reasoning. The
+# environments are separated by namespace, which each Application supplies.
+
+commonAnnotations:
+  kubernetes-labs/environment: prod
+
+labels:
+  - pairs:
+      app.kubernetes.io/instance: lab-10-prod
+    includeSelectors: false
+
+replicas:
+  - name: demo-app
+    count: 3
+
+configMapGenerator:
+  - name: demo-app-config
+    behavior: merge
+    literals:
+      - LOG_LEVEL=warn
+      - APP_TIER=prod
+      - FEATURE_FLAG_BETA=false
+
+generatorOptions:
+  disableNameSuffixHash: false
+
+patches:
+  # A strategic-merge patch, in contrast to the dev overlay's JSON 6902 patch.
+  # Strategic merge is usually the better choice: it is readable, it merges
+  # lists by key rather than by index, and it does not break when someone
+  # inserts an element earlier in the list. The dev overlay uses JSON patch
+  # only to show both forms -- note how `/env/1/value` there is a positional
+  # reference that silently targets the wrong variable if the order changes.
+  - target:
+      kind: Deployment
+      name: demo-app
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: demo-app
+      spec:
+        template:
+          spec:
+            containers:
+              - name: demo
+                env:
+                  - name: GREETING
+                    value: "Hello from the PROD overlay"
+                resources:
+                  requests:
+                    cpu: 100m
+                    memory: 128Mi
+                  limits:
+                    memory: 256Mi
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: demo-app
+                    app.kubernetes.io/instance: lab-10

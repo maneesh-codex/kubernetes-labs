@@ -1,0 +1,98 @@
+---
+# Path-based fanout. demo.localtest.me resolves to 127.0.0.1 from any public
+# resolver, so it works against a kind cluster with no /etc/hosts editing.
+#
+# nginx sorts locations by descending path length, so /api wins over / for a
+# request to /api/info even though both prefixes match. Do not rely on the
+# ORDER of the rules array - rely on the specificity of the paths.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-fanout
+  namespace: lab-02-networking
+  labels:
+    app.kubernetes.io/name: demo-fanout
+    app.kubernetes.io/instance: lab-02
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+  annotations:
+    # Local kind cluster has no TLS certificate, so do not 308-redirect to
+    # HTTPS. In production this stays at its default of "true".
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
+    # Default is 1m. Raise it deliberately and per-Ingress rather than globally
+    # in the controller ConfigMap - a large global limit is a DoS amplifier.
+    nginx.ingress.kubernetes.io/proxy-body-size: 8m
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "5"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    # Pass the original Host header through to the backend instead of rewriting
+    # it to the upstream's name. Applications that build absolute URLs need it.
+    nginx.ingress.kubernetes.io/upstream-vhost: demo.localtest.me
+spec:
+  # The modern, portable field. The deprecated kubernetes.io/ingress.class
+  # annotation still works but should not be used in new manifests.
+  ingressClassName: nginx
+  rules:
+    - host: demo.localtest.me
+      http:
+        paths:
+          # Longest-prefix wins, so this rule captures /api and /api/info.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  name: http
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  name: http
+---
+# rewrite-target is annotated per-INGRESS, not per-path, which is why it lives
+# on a second object here. Mixing it into demo-fanout would rewrite / as well
+# and break the web tier.
+#
+# This one demonstrates the classic strangler-fig pattern: an external /legacy
+# prefix is stripped before the request reaches a backend that knows nothing
+# about it. GET /legacy/api/info reaches the api pod as GET /api/info.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-legacy-rewrite
+  namespace: lab-02-networking
+  labels:
+    app.kubernetes.io/name: demo-legacy-rewrite
+    app.kubernetes.io/instance: lab-02
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/proxy-body-size: 8m
+    # $2 is the second capture group of the path regex below. A rewrite-target
+    # referencing a capture group REQUIRES use-regex: "true" - without it the
+    # literal string "/$2" is sent upstream and every request 404s.
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: demo.localtest.me
+      http:
+        paths:
+          # The (/|$) group makes both /legacy and /legacy/... match cleanly.
+          - path: /legacy(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: api
+                port:
+                  name: http

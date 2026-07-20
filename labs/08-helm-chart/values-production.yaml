@@ -1,0 +1,154 @@
+---
+# Example production override for the demo-app chart, shaped for Amazon EKS.
+#
+#   helm upgrade --install demo-app ./demo-app \
+#     --namespace lab-08-helm --create-namespace \
+#     -f values-production.yaml
+#
+# The point of this file is that it is SHORT. A good chart has defaults that
+# are already safe; the production override should only carry the things that
+# genuinely differ between environments -- scale, routing, identity and
+# placement -- not a re-statement of the entire values.yaml.
+
+# Autoscaling owns the replica count in production, so replicaCount is absent
+# here on purpose: setting it would be dead config that misleads the next
+# reader into thinking it does something.
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+  # Memory-based scaling is deliberately dropped: the Go runtime does not
+  # return heap to the OS promptly, so a memory HPA scales out and never in.
+  targetMemoryUtilizationPercentage: null
+
+image:
+  repository: ghcr.io/maneeshm/k8s-labs-demo
+  tag: "1.0.0"
+  # Always pull in production so a mutable tag cannot serve stale bits from a
+  # node's image cache. Better still: deploy by digest and drop this entirely.
+  pullPolicy: Always
+
+serviceAccount:
+  create: true
+  annotations:
+    # IRSA: the pod assumes this IAM role via a projected OIDC token, so no
+    # static AWS credentials ever exist in the cluster. The role's trust policy
+    # must name this exact namespace and ServiceAccount.
+    eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/demo-app-prod
+  automount: false
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  # The AWS Load Balancer Controller watches this class and provisions an ALB.
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    # IP mode targets pods directly, skipping the kube-proxy hop. Required for
+    # Fargate and strongly preferred on EC2 node groups.
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: >-
+      arn:aws:acm:eu-west-1:111122223333:certificate/00000000-0000-0000-0000-000000000000
+    # The ALB health check is independent of the kubelet's probes. Point it at
+    # the readiness endpoint so the ALB and Kubernetes agree on "in service".
+    alb.ingress.kubernetes.io/healthcheck-path: /readyz
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/success-codes: "200"
+    # Share one ALB across several Ingresses in the same group to avoid paying
+    # for (and hitting account limits on) one load balancer per service.
+    alb.ingress.kubernetes.io/group.name: kubernetes-labs-prod
+    alb.ingress.kubernetes.io/load-balancer-attributes: >-
+      routing.http2.enabled=true,idle_timeout.timeout_seconds=60
+  hosts:
+    - host: demo-app.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # With an ALB, TLS terminates at the load balancer using the ACM certificate
+  # above, so no tls block is needed here. Keep this list populated only when
+  # terminating TLS inside the cluster (nginx + cert-manager).
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    # No CPU limit on purpose. CFS throttling at the limit adds tail latency
+    # even when the node is idle; the request already guarantees a floor, and
+    # the HPA plus a ResourceQuota bound the ceiling. Memory IS limited,
+    # because unlike CPU it is incompressible -- without a limit one leaking
+    # pod can OOM the whole node.
+    memory: 256Mi
+
+pdb:
+  enabled: true
+  # Must stay below minReplicas or managed node group upgrades will hang
+  # waiting for an eviction that can never be allowed.
+  minAvailable: 2
+
+# Spread across availability zones first, then across nodes. DoNotSchedule on
+# the zone constraint is the one that actually protects against an AZ outage;
+# leaving it as ScheduleAnyway makes the constraint advisory and it will be
+# silently ignored under scheduling pressure.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+
+nodeSelector:
+  kubernetes.io/os: linux
+
+env:
+  - name: GREETING
+    value: "Hello from production"
+
+config:
+  LOG_LEVEL: warn
+  FEATURE_FLAG_BETA: "false"
+  APP_TIER: production
+
+# Cleared on purpose. In production the API_KEY arrives as a real Secret
+# created by External Secrets Operator from AWS Secrets Manager, and is picked
+# up by the envFrom entry below rather than being rendered from chart values.
+#
+# Note the `null`, not `{}`. Helm COALESCES maps: writing `secrets: {}` here
+# would merge an empty map over the default and leave the lab's API_KEY intact,
+# so the chart would still render a Secret containing it. Only an explicit
+# `null` deletes the parent key. This bites people constantly -- always verify
+# with `helm template ... | grep -c 'kind: Secret'` rather than assuming.
+secrets: null
+
+envFrom:
+  - secretRef:
+      name: demo-app-external-secrets
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  labels:
+    release: kube-prometheus-stack
+
+# The app writes nothing to disk, but keeping a small tmpfs available means
+# readOnlyRootFilesystem never has to be relaxed if that changes.
+extraVolumes:
+  - name: tmp
+    emptyDir:
+      medium: Memory
+      sizeLimit: 16Mi
+
+extraVolumeMounts:
+  - name: tmp
+    mountPath: /tmp
+
+terminationGracePeriodSeconds: 45

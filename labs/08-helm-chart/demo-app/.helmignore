@@ -1,0 +1,37 @@
+# Patterns to ignore when building packages.
+# Operates like .gitignore: one pattern per line, matched against the chart
+# directory root. Anything matched here never makes it into the .tgz, which
+# keeps the packaged chart small and keeps local state out of the artifact.
+
+# VCS
+.git/
+.gitignore
+.gitmodules
+.bzr/
+.bzrignore
+.hg/
+.hgignore
+.svn/
+
+# OS and editor cruft
+.DS_Store
+*.swp
+*.swo
+*.bak
+*.tmp
+*.orig
+*~
+.idea/
+.vscode/
+.project
+
+# Build and CI leftovers
+*.tgz
+.helm-release/
+ci/
+.github/
+
+# Local-only value overrides. Anything named values-local*.yaml is developer
+# scratch space and must never be shipped inside the packaged chart.
+values-local*.yaml
+secrets*.yaml

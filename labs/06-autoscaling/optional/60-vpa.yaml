@@ -1,0 +1,93 @@
+---
+# =============================================================================
+# REQUIRES THE VERTICAL POD AUTOSCALER CRDs - NOT INSTALLED BY `make cluster-up`
+# =============================================================================
+# `autoscaling.k8s.io/v1` is a CustomResourceDefinition shipped by the
+# autoscaler project, not a built-in Kubernetes API. This file lives under
+# `optional/` precisely because CI's `kubeconform --strict` has no schema for it
+# and would fail the build. Applying it without the CRDs gives you:
+#
+#   error: resource mapping not found for name: "demo-app" namespace:
+#   "lab-06-autoscaling" from "60-vpa.yaml": no matches for kind
+#   "VerticalPodAutoscaler" in version "autoscaling.k8s.io/v1"
+#
+# Install first:
+#
+#   git clone -b vpa-release-1.2 https://github.com/kubernetes/autoscaler.git
+#   cd autoscaler/vertical-pod-autoscaler
+#   ./hack/vpa-up.sh          # installs CRDs + recommender/updater/admission
+#   kubectl -n kube-system get pods -l app=vpa-recommender
+#
+# (`./hack/vpa-down.sh` removes it. The VPA also requires metrics-server, which
+# you install in step 1 of the walkthrough.)
+#
+# On EKS the equivalent is the `eks-node-monitoring-agent`-adjacent VPA install
+# via Helm: `helm install vpa fairwinds-stable/vpa -n vpa --create-namespace`.
+# -----------------------------------------------------------------------------
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: demo-app
+  namespace: lab-06-autoscaling
+  labels:
+    app.kubernetes.io/name: demo-app
+    app.kubernetes.io/instance: lab-06
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: demo-app
+  updatePolicy:
+    # ------------------------------------------------------------------------
+    # updateMode: the only field that really matters.
+    # ------------------------------------------------------------------------
+    #   "Off"       - recommend only. Read the recommendation, apply it yourself
+    #                 in Git. THIS IS THE PRODUCTION-SAFE MODE and the one you
+    #                 should default to.
+    #   "Initial"   - apply recommendations only when a Pod is created; never
+    #                 evicts. A reasonable middle ground.
+    #   "Recreate"  - evicts Pods to apply new resources. Disruptive.
+    #   "Auto"      - currently equivalent to Recreate. Before in-place resource
+    #                 resize (KEP-1287, beta in 1.33) matures, "Auto" means
+    #                 "restart my Pods whenever the recommender changes its
+    #                 mind", which is rarely what people expect from the name.
+    #
+    # We use "Off" so this manifest is safe to apply next to a live HPA.
+    updateMode: "Off"
+    # Never let VPA take the workload below availability minimums when it does
+    # evict. Ignored in "Off" mode but shown because it is easy to forget.
+    minReplicas: 2
+  resourcePolicy:
+    containerPolicies:
+      - containerName: demo-app
+        # ------------------------------------------------------------------
+        # CRITICAL: VPA and HPA must not fight over the same resource.
+        # ------------------------------------------------------------------
+        # An HPA scaling on CPU utilisation uses the CPU *request* as its
+        # denominator. If VPA is simultaneously changing that request, the HPA's
+        # target moves under it and the two controllers oscillate. The supported
+        # pattern is to split them by resource: HPA owns CPU (horizontal),
+        # VPA owns memory (vertical). `controlledResources` enforces exactly
+        # that here.
+        #
+        # The other supported pattern is HPA on a custom/external metric (queue
+        # depth, RPS) with VPA managing both CPU and memory - because then the
+        # HPA never reads a request value at all.
+        controlledResources: ["memory"]
+        # Apply recommendations to requests only, leaving limits as authored.
+        # "RequestsAndLimits" preserves the original limit:request ratio, which
+        # can inflate limits surprisingly fast.
+        controlledValues: RequestsOnly
+        minAllowed:
+          memory: 64Mi
+        # Always set maxAllowed. Without it a memory leak becomes a
+        # recommendation to request 32Gi, and then nothing schedules at all.
+        maxAllowed:
+          memory: 512Mi
+      # Belt and braces: if a sidecar is ever injected, do not let VPA touch it.
+      - containerName: "*"
+        mode: "Off"

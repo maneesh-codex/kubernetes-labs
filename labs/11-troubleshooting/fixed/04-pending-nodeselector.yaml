@@ -1,0 +1,138 @@
+---
+# FIXED 04 - Pod Pending, nodeSelector / affinity matches no node
+#
+# Changes from broken/04-pending-nodeselector.yaml:
+#   - Removed the nodeSelector entirely. It expressed a hardware requirement the
+#     workload does not actually have.
+#   - Changed the hard `requiredDuringSchedulingIgnoredDuringExecution` node
+#     affinity to a `preferred...` one, and selected on a label every node
+#     really has (`kubernetes.io/os: linux`). A preference degrades gracefully:
+#     the scheduler tries to honour it and places the Pod anyway if it cannot.
+#   - Kept a *correct* required rule as an example of when hard constraints are
+#     right: excluding control-plane nodes is a genuine requirement.
+#   - Removed the GPU toleration. Tolerations do not attract Pods to nodes; they
+#     only permit scheduling onto tainted ones. Carrying one you do not need is
+#     at best noise and at worst lets your Pod land somewhere surprising.
+#   - Added a topologySpreadConstraint, which is the modern, better-behaved way
+#     to express "spread across failure domains" - it is soft by default
+#     (`whenUnsatisfiable: ScheduleAnyway`) rather than an all-or-nothing rule.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-04-pending-nodeselector
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-04-pending-nodeselector
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broken-04-pending-nodeselector
+      app.kubernetes.io/instance: lab-11
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broken-04-pending-nodeselector
+        app.kubernetes.io/instance: lab-11
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      affinity:
+        nodeAffinity:
+          # A hard rule that is actually satisfiable, and worth having: never
+          # schedule onto a control-plane node.
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+                  - key: kubernetes.io/os
+                    operator: In
+                    values: ["linux"]
+          # A soft preference. If no node matches, the Pod still schedules.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values: ["m6i.large", "m6a.large", "m5.large"]
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: broken-04-pending-nodeselector
+              app.kubernetes.io/instance: lab-11
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: demo-app
+          image: ghcr.io/maneeshm/k8s-labs-demo:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

@@ -1,0 +1,137 @@
+---
+# BROKEN SCENARIO 06 - Service selector does not match any Pod -> 0 endpoints
+#
+# Identical *symptom* to scenario 05 (no endpoints, connection refused),
+# opposite *cause*. Here the Pods are Ready and perfect; the Service is looking
+# for labels nobody has.
+#
+# The discriminator is one command:
+#   Pods READY 1/1 + endpoints empty -> Service selector is wrong (this file)
+#   Pods READY 0/1 + endpoints empty -> readiness probe is wrong (scenario 05)
+#
+# Kubernetes will never warn you about this. A Service with a selector matching
+# nothing is a perfectly valid object.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-06-selector
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-06-selector
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broken-06-selector
+      app.kubernetes.io/instance: lab-11
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broken-06-selector
+        app.kubernetes.io/instance: lab-11
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: backend
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: demo-app
+          image: ghcr.io/maneeshm/k8s-labs-demo:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: broken-06-selector
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-06-selector
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  type: ClusterIP
+  selector:
+    # BUG 1: the key is `app`, but the Pods are labelled with the standard
+    # `app.kubernetes.io/name`. Mixing the two conventions in one repo is how
+    # this happens in real life.
+    app: broken-06-selector
+    # BUG 2: even the value is wrong - the Pods carry instance `lab-11`, not
+    # `lab-eleven`. Selector labels are AND-ed, so either bug alone is fatal.
+    app.kubernetes.io/instance: lab-eleven
+  ports:
+    - name: http
+      port: 80
+      # BUG 3: `targetPort: 8081` would not match the container's 8080 either.
+      # It is written correctly here so the endpoints failure is unambiguous -
+      # but note that with a bad targetPort you get endpoints AND connection
+      # refused, which is yet another distinct signature.
+      targetPort: http
+      protocol: TCP

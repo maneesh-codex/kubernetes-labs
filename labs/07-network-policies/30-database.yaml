@@ -1,0 +1,143 @@
+---
+# The "database" tier.
+#
+# Image choice: this is the demo app, not PostgreSQL, with PORT=5432 so it
+# listens on the canonical Postgres port. Two reasons:
+#   1. The probes stay meaningful. A real postgres:16-alpine needs exec probes
+#      (`pg_isready`), a writable data directory, and does not run under
+#      readOnlyRootFilesystem without extra volumes - all of which would
+#      distract from the networking lesson.
+#   2. We can test connectivity with plain HTTP (`wget http://database:5432/`)
+#      instead of needing a psql client in the test Pod.
+# The NetworkPolicy semantics are identical either way: policies operate on
+# L3/L4, and have no idea whether the bytes on port 5432 are Postgres wire
+# protocol or HTTP.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: database
+  namespace: lab-07-netpol
+  labels:
+    app.kubernetes.io/name: database
+    app.kubernetes.io/instance: lab-07
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: database
+      app.kubernetes.io/instance: lab-07
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: database
+        app.kubernetes.io/instance: lab-07
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+        netpol.kubernetes-labs.io/tier: database
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: database
+          image: ghcr.io/maneeshm/k8s-labs-demo:1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            # Port names are limited to 15 characters and must be a valid
+            # IANA_SVC_NAME. "postgres" is fine.
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            # The app binds ":$PORT". Nothing about 5432 is special to it.
+            - name: PORT
+              value: "5432"
+            - name: GREETING
+              value: "lab-07 database - only the backend tier may reach me."
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          # Probes target the named port, so they follow the remap for free.
+          # Worth noting: kubelet probes originate from the NODE, not from
+          # another Pod, and are therefore NOT subject to NetworkPolicy in any
+          # conformant CNI. If your probes start failing after applying a
+          # default-deny policy, the CNI is misbehaving - or, far more likely,
+          # you broke DNS. See 50-allow-dns.yaml.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: postgres
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: postgres
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: database
+  namespace: lab-07-netpol
+  labels:
+    app.kubernetes.io/name: database
+    app.kubernetes.io/instance: lab-07
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: database
+    app.kubernetes.io/instance: lab-07
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP

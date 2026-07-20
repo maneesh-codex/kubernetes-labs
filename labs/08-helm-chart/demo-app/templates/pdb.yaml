@@ -1,0 +1,26 @@
+{{- if .Values.pdb.enabled -}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "demo-app.fullname" . }}
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+spec:
+  # A PDB constrains VOLUNTARY disruption only: `kubectl drain`, cluster
+  # autoscaler consolidation, node group rolling upgrades. It does nothing when
+  # a node fails outright, and it is not a substitute for multiple replicas.
+  #
+  # The classic self-inflicted outage: minAvailable equal to (or above) the
+  # replica count. The drain then has no legal move and blocks forever, which
+  # on EKS means a managed node group upgrade that hangs until it times out.
+  {{- if .Values.pdb.minAvailable }}
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  {{- end }}
+  {{- if .Values.pdb.maxUnavailable }}
+  maxUnavailable: {{ .Values.pdb.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "demo-app.selectorLabels" . | nindent 6 }}
+{{- end }}

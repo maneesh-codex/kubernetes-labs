@@ -1,0 +1,46 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lab-07-netpol
+  labels:
+    app.kubernetes.io/name: lab-07-netpol
+    app.kubernetes.io/instance: lab-07
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: namespace
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+    # Every namespace automatically carries kubernetes.io/metadata.name (set by
+    # the NamespaceDefaultLabelName admission plugin, on by default since 1.22).
+    # That label is what makes namespaceSelector usable without hand-labelling
+    # every namespace - including kube-system, which we select on for DNS.
+    #
+    # Opt the whole namespace into the restricted Pod Security Standard.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# A second namespace, so we can demonstrate a namespaceSelector policy that
+# admits traffic from outside lab-07-netpol. Think of it as the cluster's
+# monitoring or service-mesh control plane namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lab-07-netpol-monitoring
+  labels:
+    app.kubernetes.io/name: lab-07-netpol-monitoring
+    app.kubernetes.io/instance: lab-07
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: namespace
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+    # The label our namespaceSelector policy matches on. Hand-applied labels
+    # like this are how you express trust relationships between namespaces -
+    # never rely on the namespace *name* alone in a selector unless you also
+    # control namespace creation.
+    netpol.kubernetes-labs.io/purpose: monitoring
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

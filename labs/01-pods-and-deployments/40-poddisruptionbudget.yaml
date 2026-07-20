@@ -1,0 +1,26 @@
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: demo-web
+  namespace: lab-01-workloads
+  labels:
+    app.kubernetes.io/name: demo-web
+    app.kubernetes.io/instance: lab-01
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  # A PDB constrains VOLUNTARY disruptions only: node drains, cluster autoscaler
+  # scale-down, `kubectl drain`. It does not protect against a node crashing,
+  # and it does not slow down a rolling update (that is maxUnavailable's job).
+  #
+  # minAvailable: 2 of 3 replicas means a drain can evict at most one pod at a
+  # time. Expressing it as an absolute number rather than a percentage avoids
+  # the rounding surprises you get at small replica counts.
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: demo-web
+      app.kubernetes.io/instance: lab-01

@@ -1,0 +1,129 @@
+---
+# BROKEN SCENARIO 09 - RBAC forbidden
+#
+# The Pod runs perfectly. The container is healthy. Nothing in `kubectl get
+# pods` looks wrong at all. The failure is entirely inside the application, in
+# its logs, as a 403 from the API server - which is why every "Pod-level"
+# troubleshooting instinct fails you here and you must go straight to the logs.
+#
+# This models any controller, operator, or sidecar (external-dns, cert-manager,
+# the AWS Load Balancer Controller, a leader-election library) whose
+# ServiceAccount was under-granted.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: broken-09-watcher
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-09-watcher
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: tooling
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+automountServiceAccountToken: true
+# BUG: there is no Role and no RoleBinding anywhere in this file. The
+# ServiceAccount exists, the token is mounted, authentication succeeds - and
+# every request is then denied at the authorization step. "The SA exists" and
+# "the SA can do anything" are completely unrelated statements.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-09-rbac
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-09-rbac
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: tooling
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broken-09-rbac
+      app.kubernetes.io/instance: lab-11
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broken-09-rbac
+        app.kubernetes.io/instance: lab-11
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: tooling
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      serviceAccountName: broken-09-watcher
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: watcher
+          # bitnami/kubectl runs as UID 1001 - see lab 05 for why this differs
+          # from the repo-standard 65532.
+          image: bitnami/kubectl:1.31
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "watcher starting; will list pods every 15s"
+              while true; do
+                kubectl get pods -o name || echo "list failed (see error above)"
+                sleep 15
+              done
+          env:
+            - name: HOME
+              value: /home/kubectl
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            exec:
+              command: ["/bin/true"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["/bin/true"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: home
+              mountPath: /home/kubectl
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: home
+          emptyDir:
+            sizeLimit: 32Mi
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

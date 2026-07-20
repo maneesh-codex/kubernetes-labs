@@ -1,0 +1,146 @@
+---
+# Child Application sourced from a HELM CHART rather than from manifests in
+# this repo. This is the pattern for third-party software: you do not vendor
+# the chart, you declare which version you want and how it should be
+# configured, and Argo renders it.
+#
+# Note what Argo does NOT do here: it never runs `helm install`. It runs
+# `helm template` and applies the output itself. Consequences worth knowing:
+#   - There is no Helm release secret and `helm list` shows nothing.
+#   - Helm hooks are translated to Argo hooks where possible.
+#   - `helm rollback` does not apply; you roll back through git or
+#     `argocd app rollback`.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: monitoring
+    app.kubernetes.io/instance: lab-10
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: application
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: argocd
+  annotations:
+    # Wave 0: monitoring comes up before the workloads it observes, so the
+    # first scrape is not lost and a bad deploy is visible immediately.
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: kubernetes-labs
+
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    # PIN THE CHART VERSION. `targetRevision: "*"` would let a chart release
+    # upgrade production without a commit, which is the exact class of surprise
+    # GitOps exists to eliminate. Bumping this is a reviewable pull request.
+    targetRevision: "66.2.1"
+    helm:
+      releaseName: kube-prometheus-stack
+      # Skip CRD installation from the chart's crds/ directory and manage them
+      # separately. CRDs are cluster-scoped, shared, and must not be deleted by
+      # an app prune -- doing so would delete every ServiceMonitor in the
+      # cluster. See the README's production notes.
+      skipCrds: false
+      values: |
+        # Inline values. For anything longer, use `valueFiles` pointing at a
+        # file in your repo so the values are diffable on their own.
+        prometheus:
+          prometheusSpec:
+            # The lab-09 gotcha, restated: without this, hand-written
+            # ServiceMonitors are silently ignored.
+            serviceMonitorSelectorNilUsesHelmValues: false
+            ruleSelectorNilUsesHelmValues: false
+            podMonitorSelectorNilUsesHelmValues: false
+            retention: 6h
+            resources:
+              requests:
+                cpu: 200m
+                memory: 512Mi
+              limits:
+                memory: 1536Mi
+        alertmanager:
+          alertmanagerSpec:
+            resources:
+              requests:
+                cpu: 20m
+                memory: 64Mi
+              limits:
+                memory: 128Mi
+        grafana:
+          adminPassword: prom-operator
+          persistence:
+            enabled: false
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+        # Not reachable on kind (control plane binds to localhost) and not
+        # reachable on EKS either (AWS-managed control plane).
+        kubeControllerManager:
+          enabled: false
+        kubeScheduler:
+          enabled: false
+        kubeProxy:
+          enabled: false
+        kubeEtcd:
+          enabled: false
+        defaultRules:
+          rules:
+            etcd: false
+            kubeControllerManager: false
+            kubeScheduler: false
+            kubeProxy: false
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+
+  syncPolicy:
+    automated:
+      # Prune is OFF for this application on purpose. kube-prometheus-stack
+      # owns CRDs and cluster-scoped RBAC; an accidental prune here has a blast
+      # radius far beyond this app -- deleting the ServiceMonitor CRD would
+      # delete every ServiceMonitor object in the cluster, including ones owned
+      # by other teams. Removals here should be deliberate and manual.
+      prune: false
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+      # Required for this chart: its CRDs exceed the 262144-byte annotation
+      # limit that client-side apply uses to store last-applied-configuration.
+      # Without this the sync fails with "metadata.annotations: Too long".
+      - ServerSideApply=true
+      # The operator's CRDs must exist before the CRs the chart also ships.
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
+
+  ignoreDifferences:
+    # Webhook CA bundles are injected by cert-manager or the operator itself
+    # after creation, so they are never in git and always differ.
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions:
+        - .webhooks[]?.clientConfig.caBundle
+    # CRD status is written by the API server.
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      jqPathExpressions:
+        - .status
+        - .spec.conversion

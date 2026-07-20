@@ -1,0 +1,138 @@
+---
+# =============================================================================
+# ipBlock egress with `except` - the AWS lesson.
+# =============================================================================
+# On EC2 (and therefore on every EKS worker node), 169.254.169.254 is the
+# Instance Metadata Service. Any process that can reach it can, by default,
+# read the NODE's IAM role credentials:
+#
+#   TOKEN=$(wget -q -O - --method=PUT \
+#     --header='X-aws-ec2-metadata-token-ttl-seconds: 21600' \
+#     http://169.254.169.254/latest/api/token)
+#   wget -q -O - --header="X-aws-ec2-metadata-token: $TOKEN" \
+#     http://169.254.169.254/latest/meta-data/iam/security-credentials/
+#
+# The node role usually carries AmazonEKSWorkerNodePolicy, ECR pull rights, and
+# whatever else got attached over the years. A Pod that reaches IMDS therefore
+# escapes its own IAM boundary entirely - this is the mechanism behind a large
+# share of real EKS compromises, and it is why IRSA/Pod Identity are pointless
+# unless IMDS is also blocked.
+#
+# Defence in depth, all three layers:
+#   1. IMDSv2 with `httpPutResponseHopLimit: 1` on the launch template, so the
+#      packet TTL expires before it can traverse the container network
+#      namespace back to the host. Set it in the EC2NodeClass/launch template.
+#   2. This NetworkPolicy, blocking the address at the CNI.
+#   3. IRSA or EKS Pod Identity, so the workload has its own scoped credentials
+#      and never has a reason to want IMDS.
+#
+# IMPORTANT SEMANTIC NOTE: NetworkPolicy has no deny rules, so this object does
+# not "block" anything on its own. What it does is GRANT egress to the whole
+# internet MINUS the excepted ranges - and because the namespace is already
+# default-deny (40-*.yaml), the un-granted ranges remain denied. The `except`
+# is carving a hole out of an allowance, not adding a prohibition. Delete
+# 40-default-deny.yaml and this policy stops protecting anything.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-egress-internet-except-metadata
+  namespace: lab-07-netpol
+  labels:
+    app.kubernetes.io/name: backend-egress-internet-except-metadata
+    app.kubernetes.io/instance: lab-07
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: security
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  # Applied to the backend tier only: it is the only tier with a legitimate
+  # reason to call an external API. The frontend and database tiers get no
+  # internet allowance at all, so they remain fully denied outbound.
+  podSelector:
+    matchLabels:
+      netpol.kubernetes-labs.io/tier: backend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            # Every entry in `except` MUST be a subnet of `cidr`, or the API
+            # server rejects the object with:
+            #   spec.egress[0].to[0].ipBlock.except[0]: Invalid value:
+            #   "10.0.0.0/8": must be a subnet of the CIDR
+            except:
+              # --- The metadata service. The reason this file exists. ---
+              # /32 is enough for IMDS itself; 169.254.0.0/16 is the whole
+              # link-local range, which also covers 169.254.170.2 (the ECS/
+              # Fargate task metadata endpoint) and 169.254.169.253 (the VPC
+              # DNS resolver's link-local address). Blocking the /16 is the
+              # safer default.
+              - 169.254.0.0/16
+              # --- RFC1918: keep east-west traffic on the explicit rules. ---
+              # Without these, "allow the internet" would also allow the entire
+              # VPC: every other Pod, every RDS instance, every internal ALB,
+              # the API server, and the kubelet on port 10250. Excluding
+              # RFC1918 forces all in-VPC communication to go through the
+              # deliberate podSelector rules in 60-* and 70-*.
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              # --- Carrier-grade NAT, used by some VPC/EKS configurations. ---
+              - 100.64.0.0/10
+              # --- Loopback, never a legitimate remote destination. ---
+              - 127.0.0.0/8
+      ports:
+        # Narrow the allowance to HTTPS (and HTTP for the rare plaintext
+        # dependency). An egress rule with no `ports` block permits ALL ports to
+        # the listed destinations, which is far more than "call an external
+        # HTTPS API" requires.
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+---
+# A tighter, allowlist-style alternative worth contrasting with the above.
+#
+# `0.0.0.0/0 except ...` is a DENYLIST: correct until AWS adds a new
+# link-local address, or someone stands up an internal service on a public IP.
+# Enumerating the destinations you actually need is strictly safer, and on EKS
+# it is very achievable because VPC endpoints give your AWS dependencies stable
+# private IPs.
+#
+# The catch: `ipBlock` takes CIDRs, not DNS names, and S3/ECR IP ranges change.
+# Options in increasing order of quality:
+#   * Sync `ip-ranges.json` into CIDRs with a controller (fragile).
+#   * Use VPC Interface Endpoints and allow the endpoint ENI subnet CIDRs
+#     (stable, and keeps the traffic off the internet entirely).
+#   * Use Cilium's `CiliumNetworkPolicy` with `toFQDNs`, which resolves and
+#     enforces on DNS names - the only genuinely ergonomic answer, and a strong
+#     argument for Cilium over vanilla NetworkPolicy on EKS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-egress-vpc-endpoints-example
+  namespace: lab-07-netpol
+  labels:
+    app.kubernetes.io/name: backend-egress-vpc-endpoints-example
+    app.kubernetes.io/instance: lab-07
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: security
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  podSelector:
+    matchLabels:
+      netpol.kubernetes-labs.io/tier: backend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            # Example: the subnet CIDR hosting your VPC Interface Endpoint ENIs
+            # for STS, ECR, S3, Secrets Manager. Replace with your own; these
+            # values are illustrative and match nothing in a kind cluster.
+            cidr: 10.42.16.0/20
+      ports:
+        - protocol: TCP
+          port: 443

@@ -1,0 +1,260 @@
+---
+# A StatefulSet running a real stateful workload.
+#
+# BE HONEST ABOUT WHAT THIS IS. Three replicas of the stock postgres image are
+# three INDEPENDENT databases that happen to share a name prefix - not a
+# replicated cluster. Nothing here configures streaming replication, failover,
+# or a leader election. It is arranged this way to demonstrate the StatefulSet
+# guarantees (stable identity, ordered lifecycle, one volume per ordinal) on a
+# workload where those guarantees genuinely matter.
+#
+# For production postgres on Kubernetes, use an operator - CloudNativePG or
+# Zalando/Patroni - which handles replication, failover, backups to S3, and
+# point-in-time recovery. Hand-rolling that on top of a bare StatefulSet is a
+# well-known way to lose data.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: lab-04-storage
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/instance: lab-04
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  # Must reference the HEADLESS Service - this is what creates the stable
+  # per-pod DNS names postgres-0.postgres, postgres-1.postgres, ...
+  serviceName: postgres
+  replicas: 3
+  revisionHistoryLimit: 5
+  # OrderedReady is the default and the conservative choice: pod N is created
+  # only after pod N-1 is Running and Ready, and termination runs in reverse
+  # ordinal order. Parallel starts them all at once, which is faster but wrong
+  # for anything where a primary must exist before replicas attach.
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+      app.kubernetes.io/instance: lab-04
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Updates proceed from the HIGHEST ordinal down to this partition. Set it
+      # to 2 to update only postgres-2, verify, then lower it to 0 to roll the
+      # rest - a canary mechanism built into the controller.
+      partition: 0
+  # Deleting the StatefulSet deletes neither the PVCs (whenDeleted) nor shrinks
+  # them away on scale-in (whenScaled), because Retain is the safe default for
+  # data. Set whenScaled to Delete for a cache or a scratch tier where the data
+  # is genuinely disposable - but never reflexively for a database.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/instance: lab-04
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      # Databases need time to finish checkpointing and close cleanly. 30s is
+      # too short; a SIGKILL mid-checkpoint means crash recovery on next start.
+      terminationGracePeriodSeconds: 120
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # UID/GID 70 is the `postgres` user baked into the postgres:*-alpine
+        # images. This is a deliberate departure from the repo-wide 65532:
+        # initdb refuses to run if the data directory is not owned by the
+        # running user, and the image's entrypoint expects to be this user.
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        # readOnlyRootFilesystem is false on this container (see below), but
+        # these tmpfs mounts are still worth having. /var/run/postgresql holds
+        # the unix domain socket and the postmaster lockfile; keeping it off
+        # the persistent volume means a hard kill cannot leave a stale lockfile
+        # on disk that blocks the next start.
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        # Postgres uses shared memory for its buffer pool. The container
+        # runtime default of 64Mi for /dev/shm is too small for anything real
+        # and produces confusing "could not resize shared memory segment"
+        # errors under parallel query.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            # PGDATA points at the mount path. Because the volumeMount below
+            # uses subPath: pgdata, what is actually mounted here is the
+            # `pgdata` SUBDIRECTORY of the volume - which keeps initdb away
+            # from any lost+found directory a filesystem-formatted volume
+            # (notably EBS with ext4) creates at its root. initdb refuses to
+            # run in a non-empty directory, and lost+found is the classic
+            # reason a postgres StatefulSet fails on its very first start.
+            - name: PGDATA
+              value: /var/lib/postgresql/data
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+            - name: dshm
+              mountPath: /dev/shm
+          # Scaled up from the repo-wide 50m/64Mi. A postgres that cannot get
+          # CPU during initdb or a checkpoint stalls every client connected to
+          # it, and 64Mi is below what the default shared_buffers alone wants.
+          # Memory request and limit are equal so the pod lands in the
+          # Guaranteed QoS class and is evicted last under node pressure -
+          # standard practice for a database.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          # A startup probe is essential here, not merely nice to have. The
+          # very first boot runs initdb, which on a slow disk can take well
+          # over a minute. 30 x 5s = 150s of grace before liveness engages;
+          # without it, liveness kills the pod mid-initdb and it never starts.
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1'
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          # Liveness uses the UNIX SOCKET, not TCP. A TCP check can succeed
+          # against a postmaster that is alive but wedged; more importantly,
+          # making liveness depend on the network turns a transient network
+          # blip into a database restart. Restarting a database should be a
+          # last resort, so failureThreshold is deliberately generous.
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          # Readiness checks over TCP on localhost, because that is the path
+          # clients actually use. It gates Service membership only.
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1'
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            # ============================================================
+            # readOnlyRootFilesystem: false - THE ONE EXCEPTION IN THIS REPO.
+            #
+            # Every other container in these labs runs with an immutable root
+            # filesystem. The official postgres image cannot: its entrypoint
+            # writes outside the data directory on every start. It generates
+            # and rewrites postgresql.conf and pg_hba.conf, runs initdb which
+            # creates lockfiles and temporary state, and the alpine variant
+            # touches /usr/local/share/postgresql during bootstrap.
+            #
+            # Rather than pretend otherwise with a pile of emptyDir mounts
+            # that would still miss a path and fail on some future image
+            # version, this container is granted a writable root and the risk
+            # is mitigated in depth instead: non-root UID, no privilege
+            # escalation, all capabilities dropped, RuntimeDefault seccomp,
+            # and the data itself on a separate volume.
+            #
+            # The production answer is an operator image built for this -
+            # CloudNativePG's image runs read-only-root cleanly.
+            # ============================================================
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+  # volumeClaimTemplates is what separates a StatefulSet from a Deployment.
+  # The controller creates ONE PVC PER POD, named <template>-<sts>-<ordinal>:
+  #   pgdata-postgres-0, pgdata-postgres-1, pgdata-postgres-2
+  # and re-attaches the SAME claim to the SAME ordinal forever. Delete
+  # postgres-1 and its replacement gets pgdata-postgres-1 back, with its data.
+  #
+  # These PVCs are NOT garbage-collected when the StatefulSet is deleted unless
+  # persistentVolumeClaimRetentionPolicy says so - which is a safety feature,
+  # and a billing surprise if you forget.
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+        labels:
+          app.kubernetes.io/name: postgres
+          app.kubernetes.io/instance: lab-04
+          app.kubernetes.io/version: "1.0.0"
+          app.kubernetes.io/component: database
+          app.kubernetes.io/part-of: kubernetes-labs
+          app.kubernetes.io/managed-by: kubectl
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: lab-local-path
+        resources:
+          requests:
+            storage: 2Gi

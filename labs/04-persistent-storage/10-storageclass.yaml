@@ -1,0 +1,44 @@
+---
+# A StorageClass is a named provisioning policy: "when someone asks for storage
+# of this class, call THIS provisioner with THESE parameters". It is what makes
+# a PVC portable - the same PVC yaml gets an EBS volume on EKS, a local
+# directory on kind, and a Ceph RBD image on-prem, with no change.
+#
+# kind ships rancher.io/local-path as the DEFAULT class, named `standard`. This
+# class is a sibling of it, declared explicitly so the manifests in this lab do
+# not depend on which class happens to be default in your cluster. Relying on
+# the default class is the most common cause of "it worked on my cluster".
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: lab-local-path
+  labels:
+    app.kubernetes.io/name: lab-local-path
+    app.kubernetes.io/instance: lab-04
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+  annotations:
+    # Explicitly NOT the default. Exactly one class in a cluster should carry
+    # this as "true"; two defaults makes PVC binding non-deterministic.
+    storageclass.kubernetes.io/is-default-class: "false"
+# The local-path provisioner that ships with kind. On EKS this would be
+# ebs.csi.aws.com; on GKE, pd.csi.storage.gke.io.
+provisioner: rancher.io/local-path
+# Delete: the PersistentVolume and its backing storage are destroyed when the
+# PVC is deleted. Retain keeps the PV (in Released state) so a human must
+# reclaim or delete it deliberately - the right choice for production data,
+# because it turns an accidental `kubectl delete pvc` into a recoverable event
+# rather than permanent loss.
+reclaimPolicy: Delete
+# WaitForFirstConsumer delays provisioning until a pod that uses the PVC is
+# scheduled, so the volume is created in the same zone/node as the pod. With
+# Immediate, the scheduler can be handed a volume in us-east-1a and a pod that
+# must run in us-east-1b, and the pod stays Pending forever. This is mandatory
+# for any zonal storage (EBS) and for node-local storage like local-path.
+volumeBindingMode: WaitForFirstConsumer
+# local-path cannot grow a volume in place, so expansion is off. On EBS/gp3
+# this should be true - it lets you fix a full disk with `kubectl patch pvc`
+# rather than a migration.
+allowVolumeExpansion: false

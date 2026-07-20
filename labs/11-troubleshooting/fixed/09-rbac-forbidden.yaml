@@ -1,0 +1,174 @@
+---
+# FIXED 09 - RBAC forbidden
+#
+# Changes from broken/09-rbac-forbidden.yaml:
+#   - Added the Role that grants exactly what the workload does (list/watch/get
+#     Pods) and nothing else.
+#   - Added the RoleBinding that activates it. A Role with no binding grants
+#     nothing - and creating only the Role is the most common half-fix.
+#
+# How to derive the rule from the error, mechanically. The message reads:
+#
+#   Error from server (Forbidden): pods is forbidden: User
+#   "system:serviceaccount:lab-11-troubleshooting:broken-09-watcher" cannot
+#   list resource "pods" in API group "" in the namespace "lab-11-troubleshooting"
+#
+# Map each quoted field straight into the rule:
+#   verb      "list"          -> verbs: ["list"]
+#   resource  "pods"          -> resources: ["pods"]
+#   API group ""              -> apiGroups: [""]   (empty string = core)
+#   namespace "lab-11-..."    -> a Role in that namespace (not a ClusterRole)
+#   user      "system:sa:..." -> the RoleBinding subject
+#
+# Then add `get` and `watch` alongside `list`, because any client using an
+# informer needs all three.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: broken-09-watcher
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-09-watcher
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: tooling
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: broken-09-pod-reader
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-09-pod-reader
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: broken-09-watcher-pod-reader
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-09-watcher-pod-reader
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+subjects:
+  - kind: ServiceAccount
+    name: broken-09-watcher
+    namespace: lab-11-troubleshooting
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: broken-09-pod-reader
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-09-rbac
+  namespace: lab-11-troubleshooting
+  labels:
+    app.kubernetes.io/name: broken-09-rbac
+    app.kubernetes.io/instance: lab-11
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: tooling
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: broken-09-rbac
+      app.kubernetes.io/instance: lab-11
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: broken-09-rbac
+        app.kubernetes.io/instance: lab-11
+        app.kubernetes.io/version: "1.0.0"
+        app.kubernetes.io/component: tooling
+        app.kubernetes.io/part-of: kubernetes-labs
+        app.kubernetes.io/managed-by: kubectl
+    spec:
+      serviceAccountName: broken-09-watcher
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: watcher
+          image: bitnami/kubectl:1.31
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "watcher starting; will list pods every 15s"
+              while true; do
+                kubectl get pods -o name || echo "list failed (see error above)"
+                sleep 15
+              done
+          env:
+            - name: HOME
+              value: /home/kubectl
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            exec:
+              command: ["/bin/true"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["/bin/true"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: home
+              mountPath: /home/kubectl
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: home
+          emptyDir:
+            sizeLimit: 32Mi
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

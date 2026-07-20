@@ -1,0 +1,125 @@
+---
+# ------------------------------------------------------------------------------
+# Aggregated ClusterRoles
+# ------------------------------------------------------------------------------
+# An aggregated ClusterRole has an EMPTY rules list that you never write to.
+# The controller-manager's ClusterRole aggregation controller watches for other
+# ClusterRoles whose labels match the selectors below and continuously unions
+# their rules into this object's `rules` field.
+#
+# Why this matters: it is the extension point Kubernetes itself uses. The
+# built-in `view`, `edit` and `admin` ClusterRoles are all aggregated, which is
+# how a CRD-shipping operator can add its own resources to `view` for everyone
+# without editing - and later fighting over - a shared object.
+#
+# Anything you type into `rules` here will be overwritten by the controller.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lab-05-platform-view
+  labels:
+    app.kubernetes.io/name: lab-05-platform-view
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+aggregationRule:
+  clusterRoleSelectors:
+    # Multiple selectors are OR-ed together; labels inside one selector are
+    # AND-ed. So a role needs only ONE of these labels to be pulled in.
+    - matchLabels:
+        rbac.kubernetes-labs.io/aggregate-to-platform-view: "true"
+    - matchLabels:
+        rbac.kubernetes-labs.io/aggregate-to-platform-view: "workloads"
+rules: []
+---
+# Contributor #1: workload visibility.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lab-05-platform-view-workloads
+  labels:
+    app.kubernetes.io/name: lab-05-platform-view-workloads
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+    rbac.kubernetes-labs.io/aggregate-to-platform-view: "workloads"
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+---
+# Contributor #2: networking visibility. Adding this file to the cluster
+# instantly widens lab-05-platform-view - no edit to the aggregate required.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lab-05-platform-view-networking
+  labels:
+    app.kubernetes.io/name: lab-05-platform-view-networking
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+    rbac.kubernetes-labs.io/aggregate-to-platform-view: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+# Contributing to a BUILT-IN aggregated role. This role carries the upstream
+# aggregation label, so its rules are merged into the standard `view`
+# ClusterRole cluster-wide. Powerful, and correspondingly easy to misuse -
+# review anything that carries these labels as if it were a change to `view`
+# itself, because it is.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lab-05-view-poddisruptionbudgets
+  labels:
+    app.kubernetes.io/name: lab-05-view-poddisruptionbudgets
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+rules:
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+---
+# Bind the aggregate to our tooling identity so the walkthrough can show the
+# unioned permission set with `kubectl auth can-i --list`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lab-05-kubectl-debug-platform-view
+  labels:
+    app.kubernetes.io/name: lab-05-kubectl-debug-platform-view
+    app.kubernetes.io/instance: lab-05
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+subjects:
+  - kind: ServiceAccount
+    name: kubectl-debug
+    namespace: lab-05-rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lab-05-platform-view

@@ -1,0 +1,76 @@
+---
+# The MUTABLE ConfigMap. This is the one the walkthrough edits to demonstrate
+# that a ConfigMap change does not, on its own, restart anything.
+#
+# Two shapes of data live here on purpose:
+#   * scalar keys (GREETING, LOG_LEVEL, ...) consumed as environment variables
+#   * whole-file keys (app.properties, proxy.conf) mounted as a volume
+#
+# The distinction matters at runtime: env vars are snapshotted into the process
+# at exec() time and can never change without a restart, whereas mounted keys
+# are updated in place by the kubelet within about a minute. An app that wants
+# live reload must read from the file, not from os.Getenv.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: demo-config
+  namespace: lab-03-config
+  labels:
+    app.kubernetes.io/name: demo-config
+    app.kubernetes.io/instance: lab-03
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: kubernetes-labs
+    app.kubernetes.io/managed-by: kubectl
+data:
+  # --- scalar keys: consumed via envFrom and valueFrom ------------------------
+  GREETING: "Configured from a ConfigMap, mounted and injected."
+  LOG_LEVEL: "info"
+  FEATURE_DARK_MODE: "true"
+  UPSTREAM_TIMEOUT_SECONDS: "60"
+
+  # --- file keys: consumed as a mounted volume -------------------------------
+  app.properties: |
+    # Rendered to /etc/demo/app.properties by the volumeMount in 30-deployment.
+    # Edit this key and the file contents change in the running pod within
+    # roughly a minute - no restart, no rollout. The demo image is built on
+    # scratch and has no shell, so prove it from the sidecar-free helper pod in
+    # 50-pod-config-reader.yaml:
+    #   kubectl exec -n lab-03-config config-reader -- cat /etc/demo/app.properties
+    app.name=kubernetes-labs-demo
+    app.tier=backend
+    app.log.level=info
+    app.feature.dark-mode=true
+    app.upstream.timeout=60s
+    app.metrics.path=/metrics
+
+  proxy.conf: |
+    # An nginx-style config fragment. Nothing in this lab parses it - it is here
+    # because shipping a real config FILE (rather than a pile of env vars) is
+    # the common case for anything with an upstream config format, and it shows
+    # how multi-line values survive the round trip through etcd intact.
+    upstream demo_backend {
+      server 127.0.0.1:8080 max_fails=3 fail_timeout=10s;
+      keepalive 16;
+    }
+
+    server {
+      listen 8081;
+      server_name demo.localtest.me;
+
+      client_max_body_size 8m;
+      proxy_read_timeout   60s;
+
+      location /healthz {
+        access_log off;
+        proxy_pass http://demo_backend;
+      }
+
+      location / {
+        proxy_pass       http://demo_backend;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+      }
+    }
